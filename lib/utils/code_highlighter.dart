@@ -61,9 +61,10 @@ class CodeDetector {
     }
 
     // 2. HTML & XML
-    if (RegExp(r'<!DOCTYPE\s+html|<html[\s>]|<div[\s>]|<script[\s>]|<body[\s>]',
-            caseSensitive: false)
-        .hasMatch(text)) {
+    if (RegExp(
+      r'<!DOCTYPE\s+html|<html[\s>]|<div[\s>]|<script[\s>]|<body[\s>]',
+      caseSensitive: false,
+    ).hasMatch(text)) {
       return getLanguageById('html');
     }
     if (RegExp(r'<\?xml|xmlns:|<manifest[\s>]|<application[\s>]')
@@ -89,62 +90,166 @@ class CodeDetector {
 
     // Dart / Flutter
     add('dart', RegExp(r"import\s+'package:flutter/|import\s+'dart:"), 6);
-    add('dart', RegExp(r'\b(Widget|StatelessWidget|StatefulWidget|BuildContext|setState)\b'), 5);
-    add('dart', RegExp(r'\b(void|Future|Stream|final|const|late|required)\b'), 2);
+    add(
+      'dart',
+      RegExp(
+        r'\b(Widget|StatelessWidget|StatefulWidget|BuildContext|setState)\b',
+      ),
+      5,
+    );
+    add(
+      'dart',
+      RegExp(r'\b(void|Future|Stream|final|const|late|required)\b'),
+      2,
+    );
     add('dart', RegExp(r'@override'), 2);
 
     // Python
     add('python', RegExp(r'^\s*def\s+\w+\s*\(', multiLine: true), 5);
-    add('python', RegExp(r'^\s*(from\s+\S+\s+import|import\s+\w+)', multiLine: true), 3);
-    add('python', RegExp(r'\b(elif|None|True|False|self\.|__init__|print\()\b'), 4);
+    add(
+      'python',
+      RegExp(r'^\s*(from\s+\S+\s+import|import\s+\w+)', multiLine: true),
+      3,
+    );
+    add(
+      'python',
+      RegExp(r'\b(elif|None|True|False|self\.|__init__|print\()\b'),
+      4,
+    );
     add('python', RegExp(r'if\s+__name__\s*=='), 6);
 
     // TypeScript & JavaScript
     add('typescript', RegExp(r'\b(interface|type|enum)\s+[A-Z]\w*'), 4);
-    add('typescript', RegExp(r':\s*(string|number|boolean|any|void|Promise<)\b'), 5);
-    add('javascript', RegExp(r'\b(console\.log|document\.|window\.|addEventListener|module\.exports)\b'), 5);
-    add('javascript', RegExp(r'\b(const|let|var|function|async|await|export\s+default)\b'), 2);
+    add(
+      'typescript',
+      RegExp(r':\s*(string|number|boolean|any|void|Promise<)\b'),
+      5,
+    );
+    add(
+      'javascript',
+      RegExp(
+        r'\b(console\.log|document\.|window\.|addEventListener|module\.exports)\b',
+      ),
+      5,
+    );
+    add(
+      'javascript',
+      RegExp(r'\b(const|let|var|function|async|await|export\s+default)\b'),
+      2,
+    );
     add('javascript', RegExp(r'=>'), 2);
 
     // Kotlin
-    add('kotlin', RegExp(r'\b(fun\s+\w+|override\s+fun|companion\s+object|data\s+class)\b'), 5);
+    add(
+      'kotlin',
+      RegExp(r'\b(fun\s+\w+|override\s+fun|companion\s+object|data\s+class)\b'),
+      5,
+    );
     add('kotlin', RegExp(r'\b(val|var)\s+\w+\s*[:=]'), 3);
     add('kotlin', RegExp(r'\bprintln\('), 2);
 
     // Java
-    add('java', RegExp(r'public\s+static\s+void\s+main|System\.out\.println'), 6);
+    add(
+      'java',
+      RegExp(r'public\s+static\s+void\s+main|System\.out\.println'),
+      6,
+    );
     add('java', RegExp(r'\b(public|private|protected)\s+class\s+\w+'), 4);
 
     // C++ / C / C#
-    add('cpp', RegExp(r'#include\s*<(iostream|vector|string|algorithm)>|std::|cout\s*<<'), 6);
-    add('c', RegExp(r'#include\s*<(stdio|stdlib|string)\.h>|printf\(|scanf\(|malloc\('), 6);
-    add('csharp', RegExp(r'using\s+System;|Console\.WriteLine|\bnamespace\s+\w+'), 5);
+    add(
+      'cpp',
+      RegExp(r'#include\s*<(iostream|vector|string|algorithm)>|std::|cout\s*<<'),
+      6,
+    );
+    add(
+      'c',
+      RegExp(r'#include\s*<(stdio|stdlib|string)\.h>|printf\(|scanf\(|malloc\('),
+      6,
+    );
+    add(
+      'csharp',
+      RegExp(r'using\s+System;|Console\.WriteLine|\bnamespace\s+\w+'),
+      5,
+    );
 
     // Swift
-    add('swift', RegExp(r'import\s+(SwiftUI|UIKit|Foundation)|@State\s+var|func\s+\w+\(.*\)\s*->'), 6);
+    add(
+      'swift',
+      RegExp(
+        r'import\s+(SwiftUI|UIKit|Foundation)|@State\s+var|func\s+\w+\(.*\)\s*->',
+      ),
+      6,
+    );
 
     // Go
     add('go', RegExp(r'package\s+main|func\s+main\(\)|fmt\.Print|:='), 6);
 
     // Rust
-    add('rust', RegExp(r'\bfn\s+\w+\(|let\s+mut\s+|println!|\bimpl\s+\w+'), 6);
+    add(
+      'rust',
+      RegExp(r'\bfn\s+\w+\(|let\s+mut\s+|println!|\bimpl\s+\w+'),
+      6,
+    );
 
     // SQL
-    add('sql', RegExp(r'\b(SELECT|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|CREATE\s+TABLE)\b', caseSensitive: false), 5);
-    add('sql', RegExp(r'\b(FROM|WHERE|INNER\s+JOIN|LEFT\s+JOIN|ORDER\s+BY|GROUP\s+BY)\b', caseSensitive: false), 3);
+    add(
+      'sql',
+      RegExp(
+        r'\b(SELECT|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|CREATE\s+TABLE)\b',
+        caseSensitive: false,
+      ),
+      5,
+    );
+    add(
+      'sql',
+      RegExp(
+        r'\b(FROM|WHERE|INNER\s+JOIN|LEFT\s+JOIN|ORDER\s+BY|GROUP\s+BY)\b',
+        caseSensitive: false,
+      ),
+      3,
+    );
 
     // CSS
-    add('css', RegExp(r'(display|background-color|border-radius|font-size|margin|padding|@media)\s*:'), 4);
-    add('css', RegExp(r'[.#]?[a-zA-Z0-9_-]+\s*\{[^}]*:[^}]*\}', dotAll: true), 3);
+    add(
+      'css',
+      RegExp(
+        r'(display|background-color|border-radius|font-size|margin|padding|@media)\s*:',
+      ),
+      4,
+    );
+    add(
+      'css',
+      RegExp(r'[.#]?[a-zA-Z0-9_-]+\s*\{[^}]*:[^}]*\}', dotAll: true),
+      3,
+    );
 
     // Bash / Shell
-    add('bash', RegExp(r'^#!/bin/(ba)?sh|\b(sudo|chmod|chown|grep|awk|apt-get|flutter\s+build)\b', multiLine: true), 5);
-    add('bash', RegExp(r'^\s*(echo|export|mkdir|cp|rm)\s+', multiLine: true), 3);
+    add(
+      'bash',
+      RegExp(
+        r'^#!/bin/(ba)?sh|\b(sudo|chmod|chown|grep|awk|apt-get|flutter\s+build)\b',
+        multiLine: true,
+      ),
+      5,
+    );
+    add(
+      'bash',
+      RegExp(r'^\s*(echo|export|mkdir|cp|rm)\s+', multiLine: true),
+      3,
+    );
 
     // YAML
-    add('yaml', RegExp(r'^[a-zA-Z0-9_-]+:\s*$\n^\s{2,}[a-zA-Z0-9_-]+:', multiLine: true), 5);
+    add(
+      'yaml',
+      RegExp(
+        r'^[a-zA-Z0-9_-]+:\s*$\n^\s{2,}[a-zA-Z0-9_-]+:',
+        multiLine: true,
+      ),
+      5,
+    );
 
-    // Markdown (فقط إن لم تظهر لغة أخرى)
+    // Markdown
     add('markdown', RegExp(r'^(#{1,3}\s+\S+|```)', multiLine: true), 3);
 
     String bestId = '';
@@ -189,8 +294,8 @@ class CodeSyntaxTextController extends TextEditingController {
     'try', 'type', 'typedef', 'using', 'val', 'var', 'void', 'while', 'with',
     'yield', 'SELECT', 'FROM', 'WHERE', 'INSERT', 'INTO', 'VALUES', 'UPDATE',
     'SET', 'DELETE', 'CREATE', 'TABLE', 'JOIN', 'ON', 'AND', 'OR', 'NOT',
-    'select', 'from', 'where', 'insert', 'into', 'values', 'update', 'set',
-    'delete', 'create', 'table', 'join', 'on', 'and', 'or', 'not',
+    'select', 'where', 'insert', 'into', 'values', 'update', 'set',
+    'create', 'table', 'join', 'and', 'or', 'not',
   };
 
   @override
@@ -252,9 +357,12 @@ class CodeSyntaxTextController extends TextEditingController {
     while (i < len) {
       final String ch = text[i];
 
-      // 1. تعليقات السطر الواحد // أو -- أو #
+      // 1. تعليقات السطر الواحد
       if ((ch == '/' && i + 1 < len && text[i + 1] == '/') ||
-          (ch == '-' && i + 1 < len && text[i + 1] == '-' && languageId == 'sql') ||
+          (ch == '-' &&
+              i + 1 < len &&
+              text[i + 1] == '-' &&
+              languageId == 'sql') ||
           (ch == '#' && hashCommentLang)) {
         final int nl = text.indexOf('\n', i);
         final int end = nl == -1 ? len : nl;
@@ -300,13 +408,17 @@ class CodeSyntaxTextController extends TextEditingController {
         continue;
       }
 
-      // 4. الوسوم و الـ Annotations (@override, #include, <tag)
+      // 4. الوسوم والتوجيهات (@override, #include)
       if (ch == '@' || (ch == '#' && !hashCommentLang)) {
         int j = i + 1;
         while (j < len && RegExp(r'[a-zA-Z0-9_]').hasMatch(text[j])) {
           j++;
         }
-        addSpan(i, j, base.copyWith(color: tagColor, fontWeight: FontWeight.w600));
+        addSpan(
+          i,
+          j,
+          base.copyWith(color: tagColor, fontWeight: FontWeight.w600),
+        );
         i = j;
         continue;
       }
@@ -320,7 +432,11 @@ class CodeSyntaxTextController extends TextEditingController {
         while (j < len && RegExp(r'[a-zA-Z0-9_:!?/-]').hasMatch(text[j])) {
           j++;
         }
-        addSpan(i, j, base.copyWith(color: tagColor, fontWeight: FontWeight.w600));
+        addSpan(
+          i,
+          j,
+          base.copyWith(color: tagColor, fontWeight: FontWeight.w600),
+        );
         i = j;
         continue;
       }
@@ -344,7 +460,11 @@ class CodeSyntaxTextController extends TextEditingController {
         }
         final word = text.substring(i, j);
         if (_keywords.contains(word)) {
-          addSpan(i, j, base.copyWith(color: kwColor, fontWeight: FontWeight.bold));
+          addSpan(
+            i,
+            j,
+            base.copyWith(color: kwColor, fontWeight: FontWeight.bold),
+          );
         } else if (word.isNotEmpty &&
             word[0].toUpperCase() == word[0] &&
             word[0] != '_') {
@@ -363,7 +483,7 @@ class CodeSyntaxTextController extends TextEditingController {
         continue;
       }
 
-      // 9. أي محارف أخرى (مسافات، أسطر جديدة، نص عربي)
+      // 9. أي محارف أخرى
       int j = i + 1;
       while (j < len &&
           !RegExp(r'''[a-zA-Z0-9_"'`@#/<>{}()\[\]=+\-*&|!:;.,?-]''')
