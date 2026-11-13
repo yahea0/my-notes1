@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -23,7 +24,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   String _selectedCategory = 'الكل';
-  int _currentIndex = 0;
+  int _currentIndex = 0; // 0: الرئيسية، 1: الأرشيف، 2: المفضلة، 3: الإعدادات، 4: سلة المهملات
   bool _isSearching = false;
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
@@ -196,8 +197,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _exportJsonBackup() async {
+    final box = Hive.box('notes');
+    if (box.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لا توجد ملاحظات لتصديرها حالياً')),
+      );
+      return;
+    }
+
     try {
-      final box = Hive.box('notes');
       final List<dynamic> exportList =
           box.toMap().entries.map((e) => _toJsonSafe(e.value)).toList();
 
@@ -327,6 +335,21 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _confirmEmptyTrash(OnyxPalette pal) {
+    final box = Hive.box('notes');
+    final keysToDelete = box
+        .toMap()
+        .entries
+        .where((e) => e.value is Map && e.value['isTrashed'] == true)
+        .map((e) => e.key)
+        .toList();
+
+    if (keysToDelete.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('سلة المهملات فارغة بالفعل')),
+      );
+      return;
+    }
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -338,7 +361,7 @@ class _HomeScreenState extends State<HomeScreen> {
         title:
             Text('إفراغ سلة المهملات', style: TextStyle(color: pal.textPrimary)),
         content: Text(
-          'سيتم حذف كل الملاحظات الموجودة في السلة نهائياً. هل أنت متأكد؟',
+          'سيتم حذف ${keysToDelete.length} ملاحظة من السلة نهائياً. هل أنت متأكد؟',
           style: TextStyle(color: pal.textSecondary),
         ),
         actions: [
@@ -348,13 +371,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           TextButton(
             onPressed: () {
-              final box = Hive.box('notes');
-              final keysToDelete = box
-                  .toMap()
-                  .entries
-                  .where((e) => e.value is Map && e.value['isTrashed'] == true)
-                  .map((e) => e.key)
-                  .toList();
               box.deleteAll(keysToDelete);
               Navigator.pop(ctx);
               ScaffoldMessenger.of(context).showSnackBar(
@@ -371,324 +387,541 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _showTrashedNoteOptions(
+    Box box,
+    Map note,
+    dynamic noteKey,
+    OnyxPalette pal,
+  ) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 16),
+            decoration: BoxDecoration(
+              color: pal.elevatedBg.withOpacity(0.94),
+              border: Border(top: BorderSide(color: pal.glassStrongBorder)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading:
+                      Icon(Icons.restore_from_trash, color: pal.textPrimary),
+                  title: Text(
+                    'استعادة الملاحظة',
+                    style: TextStyle(color: pal.textPrimary),
+                  ),
+                  onTap: () {
+                    final updated = Map.from(note);
+                    updated['isTrashed'] = false;
+                    box.put(noteKey, updated);
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('تمت استعادة الملاحظة')),
+                    );
+                  },
+                ),
+                ListTile(
+                  leading: Icon(Icons.delete_forever, color: pal.danger),
+                  title: Text(
+                    'حذف نهائي',
+                    style: TextStyle(color: pal.danger),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showDeleteConfirmation(
+                      box,
+                      note,
+                      noteKey,
+                      pal,
+                      forceDelete: true,
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showQuickNoteActions(
+    Box box,
+    Map note,
+    dynamic noteKey,
+    OnyxPalette pal,
+  ) {
+    final bool isFav = (note['isFavorite'] as bool?) ?? false;
+    final bool isPinned = (note['isPinned'] as bool?) ?? false;
+    final bool isArchived = (note['isArchived'] as bool?) ?? false;
+    final bool isLocked = (note['isLocked'] as bool?) ?? false;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
+            decoration: BoxDecoration(
+              color: pal.elevatedBg.withOpacity(0.94),
+              border: Border(top: BorderSide(color: pal.glassStrongBorder)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: Icon(
+                    isPinned ? Icons.push_pin : Icons.push_pin_outlined,
+                    color: isPinned ? Colors.amber : pal.textPrimary,
+                  ),
+                  title: Text(
+                    isPinned ? 'إلغاء التثبيت' : 'تثبيت في الأعلى',
+                    style: TextStyle(color: pal.textPrimary),
+                  ),
+                  onTap: () {
+                    final updated = Map.from(note);
+                    updated['isPinned'] = !isPinned;
+                    box.put(noteKey, updated);
+                    Navigator.pop(ctx);
+                  },
+                ),
+                ListTile(
+                  leading: Icon(
+                    isFav ? Icons.star : Icons.star_border,
+                    color: isFav ? Colors.amber : pal.textPrimary,
+                  ),
+                  title: Text(
+                    isFav ? 'إزالة من المفضلة' : 'إضافة للمفضلة',
+                    style: TextStyle(color: pal.textPrimary),
+                  ),
+                  onTap: () {
+                    final updated = Map.from(note);
+                    updated['isFavorite'] = !isFav;
+                    box.put(noteKey, updated);
+                    Navigator.pop(ctx);
+                  },
+                ),
+                ListTile(
+                  leading: Icon(
+                    isArchived
+                        ? Icons.unarchive_outlined
+                        : Icons.archive_outlined,
+                    color: pal.textPrimary,
+                  ),
+                  title: Text(
+                    isArchived ? 'استعادة من الأرشيف' : 'أرشفة الملاحظة',
+                    style: TextStyle(color: pal.textPrimary),
+                  ),
+                  onTap: () {
+                    final updated = Map.from(note);
+                    updated['isArchived'] = !isArchived;
+                    box.put(noteKey, updated);
+                    Navigator.pop(ctx);
+                  },
+                ),
+                if (!isLocked)
+                  ListTile(
+                    leading: Icon(Icons.share, color: pal.textPrimary),
+                    title: Text(
+                      'مشاركة النص',
+                      style: TextStyle(color: pal.textPrimary),
+                    ),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      Share.share(
+                        '${note['title'] ?? ''}\n\n${note['content'] ?? ''}',
+                      );
+                    },
+                  ),
+                ListTile(
+                  leading: Icon(Icons.delete_outline, color: pal.danger),
+                  title: Text(
+                    OnyxSettings.useTrash
+                        ? 'نقل إلى سلة المهملات'
+                        : 'حذف نهائي',
+                    style: TextStyle(color: pal.danger),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showDeleteConfirmation(box, note, noteKey, pal);
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder(
       valueListenable: Hive.box('settings').listenable(),
       builder: (context, _, __) {
-        final isDark = OnyxSettings.isDark;
-        final pal = OnyxPalette.of(isDark);
-        final isGrid = OnyxSettings.isGridView;
+        return ValueListenableBuilder(
+          valueListenable: Hive.box('notes').listenable(),
+          builder: (context, Box box, ___) {
+            final isDark = OnyxSettings.isDark;
+            final pal = OnyxPalette.of(isDark);
+            final isGrid = OnyxSettings.isGridView;
 
-        return Scaffold(
-          key: _scaffoldKey,
-          backgroundColor: pal.scaffoldBg,
-          extendBody: true,
-          drawer: _buildDrawer(pal),
-          appBar: AppBar(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            iconTheme: IconThemeData(color: pal.textPrimary),
-            leading: IconButton(
-              icon: const Icon(Icons.menu),
-              onPressed: () => _scaffoldKey.currentState?.openDrawer(),
-            ),
-            title: _isSearching
-                ? TextField(
-                    controller: _searchController,
-                    autofocus: true,
-                    style: TextStyle(color: pal.textPrimary, fontSize: 17),
-                    decoration: InputDecoration(
-                      hintText: 'ابحث في العنوان أو المحتوى أو الوسوم...',
-                      hintStyle: TextStyle(color: pal.textMuted, fontSize: 14),
-                      border: InputBorder.none,
-                    ),
-                    onChanged: (val) => setState(() => _searchQuery = val),
-                  )
-                : Text(
-                    _getTitleByIndex(_currentIndex),
-                    style: TextStyle(
-                      color: pal.textPrimary,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-            actions: [
-              if (_currentIndex == 4)
-                IconButton(
-                  tooltip: 'إفراغ السلة',
-                  icon: Icon(Icons.delete_sweep, color: pal.danger),
-                  onPressed: () => _confirmEmptyTrash(pal),
+            final allNotes = box.toMap().entries.toList();
+            final int trashCount = allNotes
+                .where((e) => e.value is Map && e.value['isTrashed'] == true)
+                .length;
+
+            final q = _searchQuery.trim().toLowerCase();
+            final filteredNotes = allNotes.where((entry) {
+              if (entry.value is! Map) return false;
+              final note = entry.value as Map;
+              final title = (note['title'] ?? '').toString();
+              final content = (note['content'] ?? '').toString();
+              final category = (note['category'] ?? 'عام').toString();
+              final tags = List<String>.from(note['tags'] ?? []);
+              final isTrashed = (note['isTrashed'] as bool?) ?? false;
+              final isArchived = (note['isArchived'] as bool?) ?? false;
+              final isFavorite = (note['isFavorite'] as bool?) ?? false;
+              final isLocked = (note['isLocked'] as bool?) ?? false;
+              final maskContent = isLocked && OnyxSettings.hideLocked;
+
+              final bool matchesSearch = q.isEmpty ||
+                  title.toLowerCase().contains(q) ||
+                  category.toLowerCase().contains(q) ||
+                  (!maskContent &&
+                      tags.any((t) => t.toLowerCase().contains(q))) ||
+                  (!maskContent && content.toLowerCase().contains(q));
+
+              bool matchesTab = false;
+              if (_currentIndex == 4) {
+                matchesTab = isTrashed;
+              } else {
+                if (isTrashed) return false;
+                if (_currentIndex == 0) matchesTab = !isArchived;
+                if (_currentIndex == 1) matchesTab = isArchived;
+                if (_currentIndex == 2) {
+                  matchesTab = isFavorite && !isArchived;
+                }
+              }
+
+              final bool matchesCategory = _currentIndex == 4 ||
+                  _selectedCategory == 'الكل' ||
+                  category == _selectedCategory;
+
+              return matchesSearch && matchesTab && matchesCategory;
+            }).toList();
+
+            final sortMode = OnyxSettings.sortMode;
+            filteredNotes.sort((a, b) {
+              final mapA = a.value as Map;
+              final mapB = b.value as Map;
+              final bool aPinned = (mapA['isPinned'] as bool?) ?? false;
+              final bool bPinned = (mapB['isPinned'] as bool?) ?? false;
+              if (aPinned && !bPinned) return -1;
+              if (!aPinned && bPinned) return 1;
+
+              if (sortMode == 'alpha') {
+                return (mapA['title'] ?? '')
+                    .toString()
+                    .compareTo((mapB['title'] ?? '').toString());
+              }
+              final int timeA = (mapA['updatedAt'] as int?) ?? 0;
+              final int timeB = (mapB['updatedAt'] as int?) ?? 0;
+              return timeB.compareTo(timeA);
+            });
+
+            // إظهار أزرار البحث والعرض والإفراغ بذكاء عند وجود محتوى فقط
+            final bool showTrashActions =
+                _currentIndex == 4 && trashCount > 0;
+            final bool showListTools = _currentIndex != 3 &&
+                (_currentIndex != 4 || trashCount > 0) &&
+                (filteredNotes.isNotEmpty || _isSearching);
+
+            return Scaffold(
+              key: _scaffoldKey,
+              backgroundColor: pal.scaffoldBg,
+              extendBody: true,
+              drawer: _buildDrawer(pal, allNotes),
+              appBar: AppBar(
+                backgroundColor: Colors.transparent,
+                elevation: 0,
+                centerTitle: false,
+                titleSpacing: 0,
+                iconTheme: IconThemeData(color: pal.textPrimary),
+                leading: IconButton(
+                  icon: const Icon(Icons.menu),
+                  onPressed: () => _scaffoldKey.currentState?.openDrawer(),
                 ),
-              if (_currentIndex != 3) ...[
-                IconButton(
-                  tooltip: 'تبديل العرض (قائمة / شبكة)',
-                  icon: Icon(
-                    isGrid
-                        ? Icons.view_agenda_outlined
-                        : Icons.grid_view_rounded,
-                  ),
-                  onPressed: () => OnyxSettings.setIsGridView(!isGrid),
-                ),
-                IconButton(
-                  tooltip: 'بحث',
-                  icon: Icon(_isSearching ? Icons.close : Icons.search),
-                  onPressed: () {
-                    setState(() {
-                      if (_isSearching) {
-                        _isSearching = false;
-                        _searchQuery = '';
-                        _searchController.clear();
-                      } else {
-                        _isSearching = true;
-                      }
-                    });
-                  },
-                ),
-              ],
-              IconButton(
-                tooltip: 'تبديل الأسود / الأبيض',
-                icon: Icon(
-                  isDark
-                      ? Icons.light_mode_outlined
-                      : Icons.dark_mode_outlined,
-                ),
-                onPressed: () => OnyxSettings.setIsDark(!isDark),
-              ),
-            ],
-          ),
-          body: OnyxBackdrop(
-            palette: pal,
-            child: _currentIndex == 3
-                ? _buildSettingsScreen(pal)
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (!_isSearching && _currentIndex != 4)
-                        SizedBox(
-                          height: 54,
-                          child: ListView(
-                            scrollDirection: Axis.horizontal,
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            children: [
-                              _categoryChip('الكل', Icons.apps),
-                              _categoryChip('العمل', Icons.work_outline),
-                              _categoryChip('الدراسة', Icons.school_outlined),
-                              _categoryChip('شخصي', Icons.person_outline),
-                              _categoryChip('عام', Icons.layers_outlined),
-                            ],
-                          ),
+                title: _isSearching
+                    ? TextField(
+                        controller: _searchController,
+                        autofocus: true,
+                        style: TextStyle(color: pal.textPrimary, fontSize: 17),
+                        decoration: InputDecoration(
+                          hintText: 'ابحث في العنوان أو المحتوى أو الوسوم...',
+                          hintStyle:
+                              TextStyle(color: pal.textMuted, fontSize: 14),
+                          border: InputBorder.none,
                         ),
-                      Expanded(
-                        child: ValueListenableBuilder(
-                          valueListenable: Hive.box('notes').listenable(),
-                          builder: (context, Box box, _) {
-                            final allNotes = box.toMap().entries.toList();
-                            final q = _searchQuery.trim().toLowerCase();
-
-                            final filteredNotes = allNotes.where((entry) {
-                              if (entry.value is! Map) return false;
-                              final note = entry.value as Map;
-                              final title = (note['title'] ?? '').toString();
-                              final content =
-                                  (note['content'] ?? '').toString();
-                              final category =
-                                  (note['category'] ?? 'عام').toString();
-                              final tags =
-                                  List<String>.from(note['tags'] ?? []);
-                              final isTrashed =
-                                  (note['isTrashed'] as bool?) ?? false;
-                              final isArchived =
-                                  (note['isArchived'] as bool?) ?? false;
-                              final isFavorite =
-                                  (note['isFavorite'] as bool?) ?? false;
-                              final isLocked =
-                                  (note['isLocked'] as bool?) ?? false;
-                              final maskContent =
-                                  isLocked && OnyxSettings.hideLocked;
-
-                              final bool matchesSearch = q.isEmpty ||
-                                  title.toLowerCase().contains(q) ||
-                                  category.toLowerCase().contains(q) ||
-                                  (!maskContent &&
-                                      tags.any(
-                                          (t) => t.toLowerCase().contains(q))) ||
-                                  (!maskContent &&
-                                      content.toLowerCase().contains(q));
-
-                              bool matchesTab = false;
-                              if (_currentIndex == 4) {
-                                matchesTab = isTrashed;
-                              } else {
-                                if (isTrashed) return false;
-                                if (_currentIndex == 0) {
-                                  matchesTab = !isArchived;
-                                }
-                                if (_currentIndex == 1) matchesTab = isArchived;
-                                if (_currentIndex == 2) {
-                                  matchesTab = isFavorite && !isArchived;
-                                }
-                              }
-
-                              final bool matchesCategory =
-                                  _currentIndex == 4 ||
-                                      _selectedCategory == 'الكل' ||
-                                      category == _selectedCategory;
-
-                              return matchesSearch &&
-                                  matchesTab &&
-                                  matchesCategory;
-                            }).toList();
-
-                            final sortMode = OnyxSettings.sortMode;
-                            filteredNotes.sort((a, b) {
-                              final mapA = a.value as Map;
-                              final mapB = b.value as Map;
-                              final bool aPinned =
-                                  (mapA['isPinned'] as bool?) ?? false;
-                              final bool bPinned =
-                                  (mapB['isPinned'] as bool?) ?? false;
-                              if (aPinned && !bPinned) return -1;
-                              if (!aPinned && bPinned) return 1;
-
-                              if (sortMode == 'alpha') {
-                                return (mapA['title'] ?? '')
-                                    .toString()
-                                    .compareTo((mapB['title'] ?? '').toString());
-                              }
-                              final int timeA =
-                                  (mapA['updatedAt'] as int?) ?? 0;
-                              final int timeB =
-                                  (mapB['updatedAt'] as int?) ?? 0;
-                              return timeB.compareTo(timeA);
-                            });
-
-                            if (filteredNotes.isEmpty) {
-                              return Center(
-                                child: Onyx3DGlassCard(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 28,
-                                    vertical: 24,
-                                  ),
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(
-                                        _currentIndex == 4
-                                            ? Icons.delete_outline
-                                            : Icons.note_alt_outlined,
-                                        size: 46,
-                                        color: pal.textMuted,
-                                      ),
-                                      const SizedBox(height: 12),
-                                      Text(
-                                        _currentIndex == 4
-                                            ? 'سلة المهملات فارغة'
-                                            : 'لا توجد ملاحظات هنا بعد',
-                                        style: TextStyle(
-                                          color: pal.textSecondary,
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            }
-
-                            if (isGrid) {
-                              return GridView.builder(
-                                padding:
-                                    const EdgeInsets.fromLTRB(16, 6, 16, 110),
-                                gridDelegate:
-                                    const SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: 2,
-                                  mainAxisSpacing: 12,
-                                  crossAxisSpacing: 12,
-                                  childAspectRatio: 0.78,
-                                ),
-                                itemCount: filteredNotes.length,
-                                itemBuilder: (context, index) {
-                                  final note =
-                                      filteredNotes[index].value as Map;
-                                  final key = filteredNotes[index].key;
-                                  return _buildNoteCard(
-                                    note,
-                                    key,
-                                    box,
-                                    pal,
-                                    compactGrid: true,
-                                  );
-                                },
-                              );
-                            }
-
-                            return ListView.builder(
-                              padding:
-                                  const EdgeInsets.only(top: 4, bottom: 110),
-                              itemCount: filteredNotes.length,
-                              itemBuilder: (context, index) {
-                                final note = filteredNotes[index].value as Map;
-                                final key = filteredNotes[index].key;
-                                return _buildNoteCard(note, key, box, pal);
-                              },
-                            );
-                          },
+                        onChanged: (val) => setState(() => _searchQuery = val),
+                      )
+                    : Text(
+                        _getTitleByIndex(_currentIndex),
+                        style: TextStyle(
+                          color: pal.textPrimary,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
                         ),
                       ),
-                    ],
-                  ),
-          ),
-          floatingActionButton: (_currentIndex == 3 || _currentIndex == 4)
-              ? null
-              : GestureDetector(
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const AddNoteScreen()),
-                  ),
-                  child: Container(
-                    width: 60,
-                    height: 60,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: pal.isDark
-                            ? [Colors.white, const Color(0xFFD5D7DF)]
-                            : [
-                                const Color(0xFF1F2026),
-                                const Color(0xFF060608),
-                              ],
-                      ),
-                      border: Border.all(color: pal.glassHighlight, width: 1.3),
-                      boxShadow: [
-                        BoxShadow(
-                          color: pal.shadowDeep,
-                          blurRadius: 20,
-                          offset: const Offset(0, 8),
-                        ),
-                      ],
+                actions: [
+                  if (showTrashActions)
+                    IconButton(
+                      tooltip: 'إفراغ السلة',
+                      icon: Icon(Icons.delete_sweep, color: pal.danger),
+                      onPressed: () => _confirmEmptyTrash(pal),
                     ),
-                    child: Icon(Icons.add, color: pal.onAccent, size: 30),
+                  if (showListTools) ...[
+                    IconButton(
+                      tooltip: 'تبديل العرض (قائمة / شبكة)',
+                      icon: Icon(
+                        isGrid
+                            ? Icons.view_agenda_outlined
+                            : Icons.grid_view_rounded,
+                      ),
+                      onPressed: () => OnyxSettings.setIsGridView(!isGrid),
+                    ),
+                    IconButton(
+                      tooltip: 'بحث',
+                      icon: Icon(_isSearching ? Icons.close : Icons.search),
+                      onPressed: () {
+                        setState(() {
+                          if (_isSearching) {
+                            _isSearching = false;
+                            _searchQuery = '';
+                            _searchController.clear();
+                          } else {
+                            _isSearching = true;
+                          }
+                        });
+                      },
+                    ),
+                  ],
+                  IconButton(
+                    tooltip: 'تبديل الأسود / الأبيض',
+                    icon: Icon(
+                      isDark
+                          ? Icons.light_mode_outlined
+                          : Icons.dark_mode_outlined,
+                    ),
+                    onPressed: () => OnyxSettings.setIsDark(!isDark),
                   ),
-                ),
-          bottomNavigationBar: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
-            child: Onyx3DGlassCard(
-              borderRadius: 26,
-              padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _navItem(0, Icons.home_rounded, 'الرئيسية', pal),
-                  _navItem(1, Icons.archive_outlined, 'الأرشيف', pal),
-                  _navItem(2, Icons.star_border_rounded, 'المفضلة', pal),
-                  _navItem(3, Icons.settings_outlined, 'الإعدادات', pal),
                 ],
               ),
-            ),
-          ),
+              body: OnyxBackdrop(
+                palette: pal,
+                child: _currentIndex == 3
+                    ? _buildSettingsScreen(pal, box)
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (!_isSearching && _currentIndex != 4)
+                            SizedBox(
+                              height: 54,
+                              child: ListView(
+                                scrollDirection: Axis.horizontal,
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 16),
+                                children: [
+                                  _categoryChip('الكل', Icons.apps),
+                                  _categoryChip('العمل', Icons.work_outline),
+                                  _categoryChip(
+                                    'الدراسة',
+                                    Icons.school_outlined,
+                                  ),
+                                  _categoryChip('شخصي', Icons.person_outline),
+                                  _categoryChip('عام', Icons.layers_outlined),
+                                ],
+                              ),
+                            ),
+                          Expanded(
+                            child: filteredNotes.isEmpty
+                                ? Center(
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(24),
+                                      child: Onyx3DGlassCard(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 24,
+                                          vertical: 26,
+                                        ),
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              _isSearching
+                                                  ? Icons.search_off_rounded
+                                                  : (_currentIndex == 4
+                                                      ? Icons.delete_outline
+                                                      : Icons
+                                                          .note_alt_outlined),
+                                              size: 46,
+                                              color: pal.textMuted,
+                                            ),
+                                            const SizedBox(height: 12),
+                                            Text(
+                                              _isSearching
+                                                  ? 'لا توجد نتائج مطابقة لـ "$_searchQuery"'
+                                                  : (_currentIndex == 4
+                                                      ? 'سلة المهملات فارغة'
+                                                      : 'لا توجد ملاحظات هنا بعد'),
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(
+                                                color: pal.textSecondary,
+                                                fontSize: 15.5,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                            if (_isSearching) ...[
+                                              const SizedBox(height: 14),
+                                              TextButton(
+                                                onPressed: () {
+                                                  setState(() {
+                                                    _isSearching = false;
+                                                    _searchQuery = '';
+                                                    _searchController.clear();
+                                                  });
+                                                },
+                                                child: Text(
+                                                  'مسح البحث',
+                                                  style: TextStyle(
+                                                    color: pal.textPrimary,
+                                                    fontWeight: FontWeight.bold,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  )
+                                : isGrid
+                                    ? GridView.builder(
+                                        padding: const EdgeInsets.fromLTRB(
+                                          16,
+                                          6,
+                                          16,
+                                          110,
+                                        ),
+                                        gridDelegate:
+                                            const SliverGridDelegateWithFixedCrossAxisCount(
+                                          crossAxisCount: 2,
+                                          mainAxisSpacing: 12,
+                                          crossAxisSpacing: 12,
+                                          childAspectRatio: 0.76,
+                                        ),
+                                        itemCount: filteredNotes.length,
+                                        itemBuilder: (context, index) {
+                                          final note =
+                                              filteredNotes[index].value as Map;
+                                          final key = filteredNotes[index].key;
+                                          return _buildNoteCard(
+                                            note,
+                                            key,
+                                            box,
+                                            pal,
+                                            compactGrid: true,
+                                          );
+                                        },
+                                      )
+                                    : ListView.builder(
+                                        padding: const EdgeInsets.only(
+                                          top: 4,
+                                          bottom: 110,
+                                        ),
+                                        itemCount: filteredNotes.length,
+                                        itemBuilder: (context, index) {
+                                          final note =
+                                              filteredNotes[index].value as Map;
+                                          final key = filteredNotes[index].key;
+                                          return _buildNoteCard(
+                                            note,
+                                            key,
+                                            box,
+                                            pal,
+                                          );
+                                        },
+                                      ),
+                          ),
+                        ],
+                      ),
+              ),
+              floatingActionButton: (_currentIndex == 3 || _currentIndex == 4)
+                  ? null
+                  : GestureDetector(
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const AddNoteScreen(),
+                        ),
+                      ),
+                      child: Container(
+                        width: 60,
+                        height: 60,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: pal.isDark
+                                ? [Colors.white, const Color(0xFFD5D7DF)]
+                                : [
+                                    const Color(0xFF1F2026),
+                                    const Color(0xFF060608),
+                                  ],
+                          ),
+                          border: Border.all(
+                            color: pal.glassHighlight,
+                            width: 1.3,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: pal.shadowDeep,
+                              blurRadius: 20,
+                              offset: const Offset(0, 8),
+                            ),
+                          ],
+                        ),
+                        child: Icon(Icons.add, color: pal.onAccent, size: 30),
+                      ),
+                    ),
+              bottomNavigationBar: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+                child: Onyx3DGlassCard(
+                  borderRadius: 26,
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      _navItem(0, Icons.home_rounded, 'الرئيسية', pal),
+                      _navItem(1, Icons.archive_outlined, 'الأرشيف', pal),
+                      _navItem(2, Icons.star_border_rounded, 'المفضلة', pal),
+                      _navItem(3, Icons.settings_outlined, 'الإعدادات', pal),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
         );
       },
     );
@@ -700,6 +933,8 @@ class _HomeScreenState extends State<HomeScreen> {
       onTap: () => setState(() {
         _currentIndex = idx;
         _isSearching = false;
+        _searchQuery = '';
+        _searchController.clear();
       }),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 220),
@@ -789,7 +1024,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final TextStyle titleStyle = applyArabicFont(
       fontFam,
       TextStyle(
-        fontSize: compactGrid ? 15.5 : titleSize.clamp(15.0, 24.0),
+        fontSize: compactGrid ? 15.0 : titleSize.clamp(15.0, 24.0),
         fontWeight: FontWeight.bold,
         color: titleColor,
       ),
@@ -814,7 +1049,12 @@ class _HomeScreenState extends State<HomeScreen> {
       borderRadius: 22,
       isHighlighted: isPinned,
       enableShimmer: isPinned,
-      onTap: isTrashed ? null : () => _openNoteWithLockCheck(note, noteKey),
+      onTap: isTrashed
+          ? () => _showTrashedNoteOptions(box, note, noteKey, pal)
+          : () => _openNoteWithLockCheck(note, noteKey),
+      onLongPress: isTrashed
+          ? () => _showTrashedNoteOptions(box, note, noteKey, pal)
+          : () => _showQuickNoteActions(box, note, noteKey, pal),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -940,7 +1180,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 borderRadius: BorderRadius.circular(12),
                 child: Image.file(
                   File(imagePaths[0].toString()),
-                  height: compactGrid ? 70 : 110,
+                  height: compactGrid ? 64 : 110,
                   width: double.infinity,
                   fit: BoxFit.cover,
                   errorBuilder: (_, __, ___) => const SizedBox.shrink(),
@@ -1001,7 +1241,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 spacing: 6,
                 runSpacing: 4,
                 children: [
-                  ...links.take(2).map(
+                  ...links.take(compactGrid ? 1 : 2).map(
                         (link) => GestureDetector(
                           onTap: () => NotificationService.openExternalUrl(
                             link.normalizedUrl,
@@ -1098,9 +1338,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   style: TextStyle(fontSize: 11, color: pal.textSecondary),
                 ),
               ),
-              Text(
-                '${note['date'] ?? ''} · ${note['time'] ?? ''}',
-                style: TextStyle(fontSize: 10.5, color: pal.textMuted),
+              Flexible(
+                child: Text(
+                  '${note['date'] ?? ''} · ${note['time'] ?? ''}',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 10.5, color: pal.textMuted),
+                ),
               ),
             ],
           ),
@@ -1182,8 +1425,11 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildDrawer(OnyxPalette pal) {
-    final all = Hive.box('notes').toMap().values.whereType<Map>();
+  Widget _buildDrawer(
+    OnyxPalette pal,
+    List<MapEntry<dynamic, dynamic>> allEntries,
+  ) {
+    final all = allEntries.map((e) => e.value).whereType<Map>();
     final int activeCount = all.where((n) => n['isTrashed'] != true).length;
     final int trashCount = all.where((n) => n['isTrashed'] == true).length;
 
@@ -1231,15 +1477,24 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: 14),
               _drawerTile(pal, Icons.home_rounded, 'الرئيسية', () {
                 Navigator.pop(context);
-                setState(() => _currentIndex = 0);
+                setState(() {
+                  _currentIndex = 0;
+                  _isSearching = false;
+                });
               }),
               _drawerTile(pal, Icons.star_border_rounded, 'المفضلة', () {
                 Navigator.pop(context);
-                setState(() => _currentIndex = 2);
+                setState(() {
+                  _currentIndex = 2;
+                  _isSearching = false;
+                });
               }),
               _drawerTile(pal, Icons.archive_outlined, 'الأرشيف', () {
                 Navigator.pop(context);
-                setState(() => _currentIndex = 1);
+                setState(() {
+                  _currentIndex = 1;
+                  _isSearching = false;
+                });
               }),
               _drawerTile(
                 pal,
@@ -1247,12 +1502,18 @@ class _HomeScreenState extends State<HomeScreen> {
                 'سلة المهملات ($trashCount)',
                 () {
                   Navigator.pop(context);
-                  setState(() => _currentIndex = 4);
+                  setState(() {
+                    _currentIndex = 4;
+                    _isSearching = false;
+                  });
                 },
               ),
               _drawerTile(pal, Icons.settings_outlined, 'الإعدادات', () {
                 Navigator.pop(context);
-                setState(() => _currentIndex = 3);
+                setState(() {
+                  _currentIndex = 3;
+                  _isSearching = false;
+                });
               }),
               Divider(color: pal.divider, height: 24),
               _drawerTile(
@@ -1290,7 +1551,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildSettingsScreen(OnyxPalette pal) {
+  Widget _buildSettingsScreen(OnyxPalette pal, Box notesBox) {
     final isDark = OnyxSettings.isDark;
     final enable3D = OnyxSettings.enable3D;
     final enableShimmer = OnyxSettings.enableShimmer;
@@ -1547,7 +1808,18 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 value: appLock,
                 activeColor: pal.accent,
-                onChanged: (v) => OnyxSettings.setAppLockEnabled(v),
+                onChanged: (v) {
+                  OnyxSettings.setAppLockEnabled(v);
+                  if (v) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'تم تفعيل قفل التطبيق (الرمز الحالي: ${OnyxSettings.vaultPin})',
+                        ),
+                      ),
+                    );
+                  }
+                },
               ),
               Divider(color: pal.divider, height: 1),
               ListTile(
@@ -1592,7 +1864,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   style: TextStyle(color: pal.textPrimary),
                 ),
                 subtitle: Text(
-                  'مشاركة وحفظ جميع الملاحظات مع النسخ للحافظة',
+                  notesBox.isEmpty
+                      ? 'لا توجد ملاحظات لتصديرها حالياً'
+                      : 'مشاركة وحفظ ${notesBox.length} ملاحظة مع النسخ للحافظة',
                   style: TextStyle(color: pal.textMuted, fontSize: 12),
                 ),
                 onTap: _exportJsonBackup,
@@ -1612,12 +1886,25 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               Divider(color: pal.divider, height: 1),
               ListTile(
-                leading: Icon(Icons.delete_forever, color: pal.danger),
+                leading: Icon(
+                  Icons.delete_forever,
+                  color: notesBox.isEmpty ? pal.textMuted : pal.danger,
+                ),
                 title: Text(
                   'مسح جميع الملاحظات',
-                  style: TextStyle(color: pal.danger),
+                  style: TextStyle(
+                    color: notesBox.isEmpty ? pal.textMuted : pal.danger,
+                  ),
                 ),
                 onTap: () {
+                  if (notesBox.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('لا توجد ملاحظات لمسحها حالياً'),
+                      ),
+                    );
+                    return;
+                  }
                   showDialog(
                     context: context,
                     builder: (ctx) => AlertDialog(
@@ -1631,20 +1918,20 @@ class _HomeScreenState extends State<HomeScreen> {
                         style: TextStyle(color: pal.textPrimary),
                       ),
                       content: Text(
-                        'هل تريد مسح جميع الملاحظات نهائياً؟',
+                        'سيتم مسح جميع الملاحظات (${notesBox.length}) نهائياً. هل أنت متأكد؟',
                         style: TextStyle(color: pal.textSecondary),
                       ),
                       actions: [
                         TextButton(
                           onPressed: () => Navigator.pop(ctx),
                           child: Text(
-                            'إلاء',
+                            'إلغاء',
                             style: TextStyle(color: pal.textMuted),
                           ),
                         ),
                         TextButton(
                           onPressed: () {
-                            Hive.box('notes').clear();
+                            notesBox.clear();
                             Navigator.pop(ctx);
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
