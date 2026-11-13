@@ -15,11 +15,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
-        android:label="My Notes"
+        android:label="ONYX Notes"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
-            android:name=".MainActivity"
+            android:name="com.example.my_notes.MainActivity"
+            android:enabled="true"
             android:exported="true"
             android:launchMode="singleTop"
             android:theme="@style/LaunchTheme"
@@ -31,7 +32,7 @@
                 android:resource="@style/NormalTheme" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.action.LAUNCHER"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
 
@@ -51,7 +52,7 @@
             android:exported="false" />
 
         <service
-            android:name=".SnoozeService"
+            android:name="com.example.my_notes.SnoozeService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="specialUse">
