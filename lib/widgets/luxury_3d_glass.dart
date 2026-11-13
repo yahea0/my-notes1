@@ -248,8 +248,10 @@ class _Onyx3DGlassCardState extends State<Onyx3DGlassCard>
                 enable3D: enable3D,
               ),
               child: Stack(
+                alignment: Alignment.center,
                 children: [
                   Container(
+                    width: double.infinity,
                     padding: widget.padding ?? const EdgeInsets.all(16),
                     decoration: BoxDecoration(
                       borderRadius: radius,
@@ -381,15 +383,13 @@ class _Glass3DBevelPainter extends CustomPainter {
       oldDelegate.enable3D != enable3D;
 }
 
-/// أيقونة دفتر ملاحظات بزمبرك مع قلم باللونين الأسود والأبيض وبروز ولمعان
-/// الحركة: يطفو الدفتر، يفتح صفحاته، يكتب القلم، يُغلق الدفتر ويوضع القلم فوقه، يتوقف ثانيتين ثم يُعيد الحركة
 class OnyxNotebook3DLogo extends StatefulWidget {
   final double size;
   final bool interactiveTilt;
 
   const OnyxNotebook3DLogo({
     super.key,
-    this.size = 230,
+    this.size = 260,
     this.interactiveTilt = true,
   });
 
@@ -406,10 +406,10 @@ class _OnyxNotebook3DLogoState extends State<OnyxNotebook3DLogo>
   @override
   void initState() {
     super.initState();
-    // 5600ms: 0.00-0.64 حركة الفتح والكتابة والإغلاق، و0.64-1.00 (~2.0 ثانية) استراحة مع لمعان
+    // دورة 6400ms: 0.00-0.68 حركة متدرجة، 0.68-1.00 (~2.05 ثانية) راحة مع لمعان
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 5600),
+      duration: const Duration(milliseconds: 6400),
     )..repeat();
   }
 
@@ -442,8 +442,8 @@ class _OnyxNotebook3DLogoState extends State<OnyxNotebook3DLogo>
         animation: _controller,
         builder: (context, _) {
           final t = _controller.value;
-          final floatY = math.sin(t * math.pi * 2) * 7.5;
-          final gentleYaw = math.sin(t * math.pi * 2) * 0.055;
+          final floatY = math.sin(t * math.pi * 2) * 8.0;
+          final gentleYaw = math.sin(t * math.pi * 2) * 0.05;
 
           return Transform.translate(
             offset: Offset(0, floatY),
@@ -451,7 +451,7 @@ class _OnyxNotebook3DLogoState extends State<OnyxNotebook3DLogo>
               alignment: Alignment.center,
               transform: Matrix4.identity()
                 ..setEntry(3, 2, 0.0014)
-                ..rotateX(_tiltX - 0.10)
+                ..rotateX(_tiltX - 0.09)
                 ..rotateY(_tiltY + gentleYaw),
               child: SizedBox(
                 width: widget.size,
@@ -483,44 +483,116 @@ class _SpiralNotebookPenPainter extends CustomPainter {
     required this.enableShimmer,
   });
 
+  // توليد مسار حبر عضوي يشبه خط اليد البشري الحقيقي
+  Offset _sampleHandwritingPoint(
+    Offset start,
+    double maxWidth,
+    double progress,
+    double ampY,
+    double seed,
+  ) {
+    final x = start.dx + (maxWidth * progress);
+    final wave = math.sin(progress * 28.0 + seed) * ampY +
+        math.cos(progress * 51.0 + seed * 1.7) * (ampY * 0.45);
+    return Offset(x, start.dy + wave);
+  }
+
+  void _drawOrganicInkLine(
+    Canvas canvas,
+    Offset start,
+    double maxWidth,
+    double progress,
+    double ampY,
+    double seed,
+    Paint paint,
+  ) {
+    if (progress <= 0.01) return;
+    final int steps = math.max(8, (progress * 36).round());
+    final path = Path();
+    final first = _sampleHandwritingPoint(start, maxWidth, 0.0, ampY, seed);
+    path.moveTo(first.dx, first.dy);
+    for (int i = 1; i <= steps; i++) {
+      final p = (i / steps) * progress;
+      final pt = _sampleHandwritingPoint(start, maxWidth, p, ampY, seed);
+      path.lineTo(pt.dx, pt.dy);
+    }
+    canvas.drawPath(path, paint);
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final w = size.width;
     final h = size.height;
 
-    // تقسيم مراحل الأنيميشن
     double openFactor = 0.0;
-    double writeFactor = 0.0;
-    double penRestFactor = 1.0;
+    double penHover = 0.0; // ارتفاع القلم عن السطح عند الفتح أو الإغلاق
+    double penBlendToWrite = 0.0; // 0 = مستقر فوق الغلاف، 1 = في وضع الكتابة
+    double l1 = 0.0;
+    double l2 = 0.0;
+    double l3 = 0.0;
+    bool isActivelyWriting = false;
 
-    if (t < 0.18) {
-      // فتح الدفتر
-      openFactor = Curves.easeInOutCubic.transform(t / 0.18);
-      writeFactor = 0.0;
-      penRestFactor = 1.0 - openFactor;
-    } else if (t < 0.48) {
-      // الدفتر مفتوح والقلم يكتب في الصفحة
+    if (t < 0.14) {
+      // المرحلة 1: رفع القلم جانبًا مع فتح الغلاف ذي الزمبرك
+      final p = Curves.easeInOutCubic.transform(t / 0.14);
+      openFactor = p;
+      penHover = math.sin(p * math.pi);
+      penBlendToWrite = p;
+    } else if (t < 0.50) {
+      // المرحلة 2: كتابة القلم بيد إنسان وبسرعة متساوية عبر السطور الثلاثة
       openFactor = 1.0;
-      writeFactor = Curves.easeInOut.transform((t - 0.18) / 0.30);
-      penRestFactor = 0.0;
-    } else if (t < 0.64) {
-      // إغلاق الدفتر ووضع القلم فوقه
-      final closeP = Curves.easeInOutCubic.transform((t - 0.48) / 0.16);
-      openFactor = 1.0 - closeP;
-      writeFactor = 1.0;
-      penRestFactor = closeP;
-    } else {
-      // ثبات ثانيتين مع لمعان وتطواف
+      penBlendToWrite = 1.0;
+      isActivelyWriting = true;
+      final wt = (t - 0.14) / 0.36; // 0.0 .. 1.0
+      if (wt < 0.30) {
+        l1 = (wt / 0.30).clamp(0.0, 1.0);
+        penHover = 0.0;
+      } else if (wt < 0.35) {
+        l1 = 1.0;
+        final moveP = (wt - 0.30) / 0.05;
+        penHover = math.sin(moveP * math.pi) * 0.45;
+      } else if (wt < 0.65) {
+        l1 = 1.0;
+        l2 = ((wt - 0.35) / 0.30).clamp(0.0, 1.0);
+        penHover = 0.0;
+      } else if (wt < 0.70) {
+        l1 = 1.0;
+        l2 = 1.0;
+        final moveP = (wt - 0.65) / 0.05;
+        penHover = math.sin(moveP * math.pi) * 0.45;
+      } else {
+        l1 = 1.0;
+        l2 = 1.0;
+        l3 = ((wt - 0.70) / 0.30).clamp(0.0, 1.0);
+        penHover = 0.0;
+      }
+    } else if (t < 0.60) {
+      // المرحلة 3: رفع القلم لأعلى أولاً ثم إغلاق الغلاف بنعومة
+      final p = Curves.easeInOutCubic.transform((t - 0.50) / 0.10);
+      openFactor = 1.0 - p;
+      l1 = 1.0;
+      l2 = 1.0;
+      l3 = 1.0;
+      penHover = math.sin(p * math.pi * 0.7) * 1.15;
+      penBlendToWrite = 1.0 - p;
+    } else if (t < 0.68) {
+      // المرحلة 4: نزول القلم بهدوء واستقراره قطرياً فوق الدفتر المغلق
+      final p = Curves.easeOutCubic.transform((t - 0.60) / 0.08);
       openFactor = 0.0;
-      writeFactor = 0.0;
-      penRestFactor = 1.0;
+      penHover = (1.0 - p) * 0.65;
+      penBlendToWrite = 0.0;
+    } else {
+      // المرحلة 5: ثبات ثانيتين مع تطواف ولمعان
+      openFactor = 0.0;
+      penHover = 0.0;
+      penBlendToWrite = 0.0;
     }
 
-    // إزاحة أفقية بسيطة عند الفتح لإبقاء الدفتر متمركزًا بصريًا
-    final double bookW = w * 0.44;
-    final double bookH = h * 0.58;
-    final double spineX = w * 0.28 + (openFactor * w * 0.22);
-    final double bookTop = h * 0.20;
+    // أبعاد كبيرة ومتوازنة تملأ الإطار
+    final double bookW = w * 0.43;
+    final double bookH = h * 0.64;
+    final double spineX = w * 0.285 + (openFactor * w * 0.215);
+    final double bookTop = h * 0.18;
     final double bookBottom = bookTop + bookH;
     final double cornerR = w * 0.045;
 
@@ -531,8 +603,8 @@ class _SpiralNotebookPenPainter extends CustomPainter {
           (isDark ? Colors.white : Colors.black).withOpacity(isDark ? 0.13 : 0.08),
           Colors.transparent,
         ],
-      ).createShader(Rect.fromCircle(center: Offset(w * 0.5, h * 0.5), radius: w * 0.46));
-    canvas.drawCircle(Offset(w * 0.5, h * 0.5), w * 0.46, haloPaint);
+      ).createShader(Rect.fromCircle(center: Offset(w * 0.5, h * 0.5), radius: w * 0.48));
+    canvas.drawCircle(Offset(w * 0.5, h * 0.5), w * 0.48, haloPaint);
 
     // 2. ظل ثلاثي الأبعاد أسفل الدفتر
     final shadowPaint = Paint()
@@ -540,16 +612,16 @@ class _SpiralNotebookPenPainter extends CustomPainter {
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 18);
     canvas.drawOval(
       Rect.fromCenter(
-        center: Offset(spineX + bookW * 0.48 - openFactor * bookW * 0.3, h * 0.87),
-        width: bookW * (1.05 + openFactor * 0.65),
+        center: Offset(spineX + bookW * 0.48 - openFactor * bookW * 0.32, h * 0.89),
+        width: bookW * (1.08 + openFactor * 0.68),
         height: h * 0.09,
       ),
       shadowPaint,
     );
 
-    // 3. الغلاف الخلفي وسماكة الورق ثلاثية الأبعاد
-    final double depthX = w * 0.025;
-    final double depthY = h * 0.025;
+    // 3. الغلاف الخلفي وسماكة الصفحات ثلاثية الأبعاد
+    final double depthX = w * 0.028;
+    final double depthY = h * 0.024;
     final backCoverRect = RRect.fromRectAndCorners(
       Rect.fromLTWH(spineX, bookTop + depthY, bookW + depthX, bookH),
       topRight: Radius.circular(cornerR),
@@ -557,19 +629,15 @@ class _SpiralNotebookPenPainter extends CustomPainter {
       topLeft: Radius.circular(cornerR * 0.35),
       bottomLeft: Radius.circular(cornerR * 0.35),
     );
-    canvas.drawRRect(
-      backCoverRect,
-      Paint()..color = const Color(0xFF0A0A0D),
-    );
+    canvas.drawRRect(backCoverRect, Paint()..color = const Color(0xFF0A0A0D));
     canvas.drawRRect(
       backCoverRect,
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.0
+        ..strokeWidth = 1.1
         ..color = Colors.white.withOpacity(0.28),
     );
 
-    // حواف صفحات الورق البيضاء (بروز الصفحات الجانبية والسفلية)
     final pageBlockRect = RRect.fromRectAndCorners(
       Rect.fromLTWH(spineX, bookTop + depthY * 0.45, bookW + depthX * 0.55, bookH),
       topRight: Radius.circular(cornerR * 0.85),
@@ -578,14 +646,14 @@ class _SpiralNotebookPenPainter extends CustomPainter {
     canvas.drawRRect(
       pageBlockRect,
       Paint()
-        ..shader = LinearGradient(
+        ..shader = const LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: const [Color(0xFFE9EBF0), Color(0xFFC5C9D4)],
+          colors: [Color(0xFFE9EBF0), Color(0xFFC5C9D4)],
         ).createShader(pageBlockRect.outerRect),
     );
 
-    // الصفحة اليمنى (البيضاء) التي يكتب عليها القلم
+    // الصفحة اليمنى البيضاء
     final rightPageRect = RRect.fromRectAndCorners(
       Rect.fromLTWH(spineX, bookTop, bookW, bookH),
       topRight: Radius.circular(cornerR),
@@ -603,9 +671,9 @@ class _SpiralNotebookPenPainter extends CustomPainter {
         ).createShader(rightPageRect.outerRect),
     );
 
-    // سطور مسطّرة خفيفة على الصفحة اليمنى
+    // سطور مسطرة خفيفة
     final rulePaint = Paint()
-      ..color = Colors.black.withOpacity(0.09)
+      ..color = Colors.black.withOpacity(0.085)
       ..strokeWidth = 1.0;
     for (int i = 1; i <= 5; i++) {
       final ly = bookTop + bookH * (0.20 + i * 0.13);
@@ -616,44 +684,63 @@ class _SpiralNotebookPenPainter extends CustomPainter {
       );
     }
 
-    // خطوط الحبر المرسومة أثناء الكتابة (تظهر في الصفحة المفتوحة)
-    Offset activeNibPoint = Offset(spineX + bookW * 0.22, bookTop + bookH * 0.33);
-    if (openFactor > 0.25) {
+    // حساب موضع القلم أثناء الكتابة البشرية
+    final double xStart = spineX + bookW * 0.16;
+    final double y1 = bookTop + bookH * 0.33 - 4;
+    final double y2 = bookTop + bookH * 0.46 - 4;
+    final double y3 = bookTop + bookH * 0.59 - 4;
+    final double w1 = bookW * 0.68;
+    final double w2 = bookW * 0.64;
+    final double w3 = bookW * 0.58;
+    final double ampY = h * 0.009;
+
+    Offset writeNibPoint = Offset(xStart, y1);
+    double wristProgress = 0.0;
+
+    if (openFactor > 0.20) {
       final inkPaint = Paint()
         ..color = const Color(0xFF101116)
-        ..strokeWidth = w * 0.013
-        ..strokeCap = StrokeCap.round;
+        ..strokeWidth = w * 0.012
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..style = PaintingStyle.stroke;
 
-      final double l1 = (writeFactor * 3.0).clamp(0.0, 1.0);
-      final double l2 = ((writeFactor - 0.33) * 3.0).clamp(0.0, 1.0);
-      final double l3 = ((writeFactor - 0.66) * 3.0).clamp(0.0, 1.0);
+      _drawOrganicInkLine(canvas, Offset(xStart, y1), w1, l1, ampY, 0.0, inkPaint);
+      _drawOrganicInkLine(canvas, Offset(xStart, y2), w2, l2, ampY, 2.2, inkPaint);
+      _drawOrganicInkLine(canvas, Offset(xStart, y3), w3, l3, ampY, 4.1, inkPaint);
 
-      final y1 = bookTop + bookH * 0.33 - 3;
-      final y2 = bookTop + bookH * 0.46 - 3;
-      final y3 = bookTop + bookH * 0.59 - 3;
-      final xStart = spineX + bookW * 0.16;
-      final xMax = bookW * 0.68;
-
-      if (l1 > 0) {
-        final endX = xStart + xMax * l1;
-        canvas.drawLine(Offset(xStart, y1), Offset(endX, y1), inkPaint);
-        activeNibPoint = Offset(endX, y1);
-      }
-      if (l2 > 0) {
-        final endX = xStart + (xMax * 0.85) * l2;
-        canvas.drawLine(Offset(xStart, y2), Offset(endX, y2), inkPaint);
-        activeNibPoint = Offset(endX, y2);
-      }
-      if (l3 > 0) {
-        final endX = xStart + (xMax * 0.58) * l3;
-        canvas.drawLine(Offset(xStart, y3), Offset(endX, y3), inkPaint);
-        activeNibPoint = Offset(endX, y3);
+      if (t >= 0.14 && t < 0.50) {
+        final wt = (t - 0.14) / 0.36;
+        if (wt < 0.30) {
+          wristProgress = l1;
+          writeNibPoint = _sampleHandwritingPoint(Offset(xStart, y1), w1, l1, ampY, 0.0);
+        } else if (wt < 0.35) {
+          final p = (wt - 0.30) / 0.05;
+          final fromPt = _sampleHandwritingPoint(Offset(xStart, y1), w1, 1.0, ampY, 0.0);
+          final toPt = _sampleHandwritingPoint(Offset(xStart, y2), w2, 0.0, ampY, 2.2);
+          writeNibPoint = Offset.lerp(fromPt, toPt, p)!;
+          wristProgress = 1.0 - p;
+        } else if (wt < 0.65) {
+          wristProgress = l2;
+          writeNibPoint = _sampleHandwritingPoint(Offset(xStart, y2), w2, l2, ampY, 2.2);
+        } else if (wt < 0.70) {
+          final p = (wt - 0.65) / 0.05;
+          final fromPt = _sampleHandwritingPoint(Offset(xStart, y2), w2, 1.0, ampY, 2.2);
+          final toPt = _sampleHandwritingPoint(Offset(xStart, y3), w3, 0.0, ampY, 4.1);
+          writeNibPoint = Offset.lerp(fromPt, toPt, p)!;
+          wristProgress = 1.0 - p;
+        } else {
+          wristProgress = l3;
+          writeNibPoint = _sampleHandwritingPoint(Offset(xStart, y3), w3, l3, ampY, 4.1);
+        }
+      } else {
+        writeNibPoint = _sampleHandwritingPoint(Offset(xStart, y3), w3, l3, ampY, 4.1);
       }
     }
 
-    // 4. الغلاف الأمامي المتحرك حول الزمبرك (من مغلق لليمين إلى مفتوح لليسار)
+    // 4. الغلاف الأمامي المتحرك حول الزمبرك
     final double angle = openFactor * math.pi * 0.92;
-    final double cosA = math.cos(angle); // 1 مغلق -> -0.96 مفتوح لليسار
+    final double cosA = math.cos(angle);
     final double coverEdgeX = spineX + bookW * cosA;
     final double liftY = math.sin(angle) * (h * 0.045);
 
@@ -677,12 +764,11 @@ class _SpiralNotebookPenPainter extends CustomPainter {
         ).createShader(coverPath.getBounds()),
     );
 
-    // بطاقة بيضاء أنيقة وسط الغلاف الأمامي عند الإغلاق
     if (!showingInnerCover && cosA > 0.28) {
       final plateW = bookW * 0.56 * cosA;
-      final plateH = bookH * 0.24;
+      final plateH = bookH * 0.23;
       final plateCenterX = spineX + bookW * 0.54 * cosA;
-      final plateCenterY = bookTop + bookH * 0.34 - liftY * 0.5;
+      final plateCenterY = bookTop + bookH * 0.30 - liftY * 0.5;
       final plate = RRect.fromRectAndRadius(
         Rect.fromCenter(
           center: Offset(plateCenterX, plateCenterY),
@@ -691,10 +777,7 @@ class _SpiralNotebookPenPainter extends CustomPainter {
         ),
         Radius.circular(w * 0.025),
       );
-      canvas.drawRRect(
-        plate,
-        Paint()..color = Colors.white.withOpacity(0.92),
-      );
+      canvas.drawRRect(plate, Paint()..color = Colors.white.withOpacity(0.92));
       canvas.drawLine(
         Offset(plateCenterX - plateW * 0.3, plateCenterY - 3),
         Offset(plateCenterX + plateW * 0.3, plateCenterY - 3),
@@ -713,7 +796,6 @@ class _SpiralNotebookPenPainter extends CustomPainter {
       );
     }
 
-    // حافة لامعة على الغلاف المتحرك
     canvas.drawPath(
       coverPath,
       Paint()
@@ -730,17 +812,35 @@ class _SpiralNotebookPenPainter extends CustomPainter {
         ).createShader(coverPath.getBounds()),
     );
 
-    // 5. الزمبرك المعدني الحلزوني الثلاثي الأبعاد على محور الدفتر
+    if (enableShimmer) {
+      final sx = -w * 0.4 + (t * w * 1.9);
+      canvas.save();
+      canvas.clipPath(coverPath);
+      canvas.drawRect(
+        Rect.fromLTWH(sx, 0, w * 0.28, h),
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Colors.transparent,
+              Colors.white.withOpacity(0.22),
+              Colors.transparent,
+            ],
+          ).createShader(Rect.fromLTWH(sx, 0, w * 0.28, h)),
+      );
+      canvas.restore();
+    }
+
+    // 5. الزمبرك المعدني الحلزوني (7 حلقات بارزة)
     const int coilCount = 7;
     for (int i = 0; i < coilCount; i++) {
       final double cy = bookTop + bookH * (0.11 + (i * 0.78 / (coilCount - 1)));
-      // ثقب في الورقة
       canvas.drawCircle(
         Offset(spineX + w * 0.022, cy),
         w * 0.013,
         Paint()..color = const Color(0xFF14151B),
       );
-      // حلقة الزمبرك المعدنية
       final coilRect = Rect.fromCenter(
         center: Offset(spineX - w * 0.008, cy),
         width: w * 0.072,
@@ -764,33 +864,47 @@ class _SpiralNotebookPenPainter extends CustomPainter {
     }
 
     // 6. القلم ثلاثي الأبعاد باللون الأسود والأبيض الأنيق
-    // موضع القلم: إما يكتب عند activeNibPoint أو يستقر فوق الدفتر المغلق
-    final Offset restTip = Offset(spineX + bookW * 0.25, bookTop + bookH * 0.76);
-    final Offset penTip = Offset.lerp(activeNibPoint, restTip, penRestFactor)!;
-    final double penAngle = ui.lerpDouble(-0.72, -0.64, penRestFactor)!;
-    final double penLen = w * 0.40;
-    final double penThick = w * 0.056;
+    // موضع الاستراحة متمركز بدقة داخل حدود الدفتر المغلق
+    final Offset restTip = Offset(spineX + bookW * 0.23, bookTop + bookH * 0.72);
+    Offset penTip = Offset.lerp(restTip, writeNibPoint, penBlendToWrite)!;
+    // تطبيق ارتفاع القلم عن السطح عند فتح/إغلاق الدفتر أو الانتقال بين الأسطر
+    penTip = penTip.translate(penHover * (w * 0.02), -penHover * (h * 0.095));
 
-    // ظل القلم على الدفتر
+    // زاوية المعصم البشرية + اهتزاز خفيف أثناء الكتابة
+    final double handRock = isActivelyWriting
+        ? (0.09 * wristProgress + math.sin(t * 185.0) * 0.025)
+        : 0.0;
+    final double penAngle =
+        ui.lerpDouble(-0.78, -0.88, penBlendToWrite)! + handRock;
+
+    final double penLen = w * 0.35;
+    final double penThick = w * 0.052;
+    final double penScale = 1.0 + (penHover * 0.06);
+
+    // ظل القلم (يتوسع ويبتعد قليلاً عند رفع القلم عن الورق)
     canvas.save();
-    canvas.translate(penTip.dx + 4, penTip.dy + 6);
+    canvas.translate(
+      penTip.dx + 4 + penHover * 6,
+      penTip.dy + 6 + penHover * 14,
+    );
     canvas.rotate(penAngle);
+    canvas.scale(penScale);
     canvas.drawRRect(
       RRect.fromRectAndRadius(
         Rect.fromLTWH(0, -penThick * 0.45, penLen, penThick * 0.9),
         Radius.circular(penThick),
       ),
       Paint()
-        ..color = Colors.black.withOpacity(0.45)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7),
+        ..color = Colors.black.withOpacity((0.46 - penHover * 0.16).clamp(0.15, 0.5))
+        ..maskFilter = MaskFilter.blur(BlurStyle.normal, 7 + penHover * 6),
     );
     canvas.restore();
 
     canvas.save();
     canvas.translate(penTip.dx, penTip.dy);
     canvas.rotate(penAngle);
+    canvas.scale(penScale);
 
-    // رأس القلم الفضي المدبب
     final nibPath = Path()
       ..moveTo(0, 0)
       ..lineTo(penLen * 0.16, -penThick * 0.46)
@@ -805,10 +919,8 @@ class _SpiralNotebookPenPainter extends CustomPainter {
           colors: [Colors.white, Color(0xFF9EA3B0)],
         ).createShader(nibPath.getBounds()),
     );
-    // سن حبر أسود دقيق
     canvas.drawCircle(Offset(1.2, 0), w * 0.008, Paint()..color = Colors.black);
 
-    // جسم القلم السفلي (أبيض لؤلؤي بارز)
     final lowerBarrel = Rect.fromLTWH(
       penLen * 0.16,
       -penThick * 0.48,
@@ -825,7 +937,6 @@ class _SpiralNotebookPenPainter extends CustomPainter {
         ).createShader(lowerBarrel),
     );
 
-    // جسم القلم العلوي (أسود أوبسيدي فاخر)
     final upperBarrel = RRect.fromRectAndCorners(
       Rect.fromLTWH(
         penLen * 0.40,
@@ -846,7 +957,6 @@ class _SpiralNotebookPenPainter extends CustomPainter {
         ).createShader(upperBarrel.outerRect),
     );
 
-    // حلقة فضية فاصلة + مشبك قلم أبيض لامع
     canvas.drawRect(
       Rect.fromLTWH(
         penLen * 0.39,
@@ -869,7 +979,6 @@ class _SpiralNotebookPenPainter extends CustomPainter {
       Paint()..color = Colors.white.withOpacity(0.92),
     );
 
-    // حافة لمعان طولية على القلم
     canvas.drawLine(
       Offset(penLen * 0.16, -penThick * 0.24),
       Offset(penLen * 0.94, -penThick * 0.24),
@@ -880,27 +989,6 @@ class _SpiralNotebookPenPainter extends CustomPainter {
     );
 
     canvas.restore();
-
-    // 7. وميض اللمعان الخفيف فوق الغلاف أثناء فترة الثبات والفتح
-    if (enableShimmer) {
-      final sx = -w * 0.4 + (t * w * 1.9);
-      canvas.save();
-      canvas.clipPath(coverPath);
-      canvas.drawRect(
-        Rect.fromLTWH(sx, 0, w * 0.28, h),
-        Paint()
-          ..shader = LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              Colors.transparent,
-              Colors.white.withOpacity(0.22),
-              Colors.transparent,
-            ],
-          ).createShader(Rect.fromLTWH(sx, 0, w * 0.28, h)),
-      );
-      canvas.restore();
-    }
   }
 
   @override
