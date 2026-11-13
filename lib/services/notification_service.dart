@@ -81,6 +81,23 @@ void notificationTapBackground(NotificationResponse notificationResponse) async 
 }
 
 class NotificationService {
+  static Future<bool> openExternalUrl(String rawUrl) async {
+    String url = rawUrl.trim();
+    if (url.isEmpty) return false;
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'https://$url';
+    }
+    try {
+      final res = await alarmMethodChannel.invokeMethod<bool>('openUrl', {
+        'url': url,
+      });
+      return res ?? true;
+    } catch (e) {
+      debugPrint('Error opening url: $e');
+      return false;
+    }
+  }
+
   static Future<void> initNotifications() async {
     tz.initializeTimeZones();
     try {
