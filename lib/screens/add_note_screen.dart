@@ -47,7 +47,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   String _fontFamily = 'Tahoma';
   double _titleFontSize = 22.0;
   double _contentFontSize = 16.0;
-  bool _styleForTitle = true;
 
   List<String> _imagePaths = [];
   List<Map<String, String>> _audioRecords = [];
@@ -105,9 +104,11 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       _customTitleColor = n['textColor'] as int?;
       _customContentColor = n['contentColor'] as int?;
       _fontFamily = (n['fontFamily'] as String?) ?? OnyxSettings.defaultFont;
-      _titleFontSize = ((n['titleFontSize'] as num?) ?? 22.0).toDouble();
       _contentFontSize = ((n['contentFontSize'] as num?) ??
               OnyxSettings.defaultContentSize)
+          .toDouble();
+      _titleFontSize = ((n['titleFontSize'] as num?) ??
+              (_contentFontSize + 6.0).clamp(18.0, 38.0))
           .toDouble();
       _imagePaths = List<String>.from(n['imagePaths'] ?? []);
       _audioRecords = List<Map<String, String>>.from(
@@ -125,6 +126,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     } else {
       _fontFamily = OnyxSettings.defaultFont;
       _contentFontSize = OnyxSettings.defaultContentSize;
+      _titleFontSize = (_contentFontSize + 6.0).clamp(18.0, 38.0);
     }
 
     _refreshCodeDetection();
@@ -262,8 +264,28 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
 
   bool get _hasUnsavedChanges => _computeSignature() != _initialSignature;
 
+  Future<void> _stopRecordingSafelyIfNeeded({bool saveResult = false}) async {
+    if (!_isRecording) return;
+    _recordTimer?.cancel();
+    try {
+      final path = await _audioRecorder.stop();
+      _isRecording = false;
+      _recordSeconds = 0;
+      if (saveResult && path != null) {
+        _audioRecords.add({
+          'path': path,
+          'name': 'تسجيل ${_audioRecords.length + 1}',
+        });
+      }
+    } catch (_) {
+      _isRecording = false;
+      _recordSeconds = 0;
+    }
+  }
+
   Future<void> _handleBackPressed() async {
-    if (!OnyxSettings.confirmOnExit || !_hasUnsavedChanges) {
+    if (!OnyxSettings.confirmOnExit || (!_hasUnsavedChanges && !_isRecording)) {
+      await _stopRecordingSafelyIfNeeded();
       if (mounted) Navigator.of(context).pop();
       return;
     }
@@ -282,7 +304,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
           style: TextStyle(color: pal.textPrimary, fontWeight: FontWeight.bold),
         ),
         content: Text(
-          'لديك تعديلات لم تُحفظ بعد. اختر حفظ وخروج أو إلغاء لتجاهلها.',
+          _isRecording
+              ? 'لا يزال التسجيل الصوتي يعمل. يمكنك حفظ الملاحظة مع التسجيل أو الإلغاء.'
+              : 'لديك تعديلات لم تُحفظ بعد. اختر حفظ وخروج أو إلغاء لتجاهلها.',
           style: TextStyle(color: pal.textSecondary, fontSize: 13.5),
         ),
         actions: [
@@ -313,9 +337,10 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
 
     if (!mounted || action == null) return;
     if (action == 'discard') {
-      Navigator.of(context).pop();
+      await _stopRecordingSafelyIfNeeded();
+      if (mounted) Navigator.of(context).pop();
     } else if (action == 'save') {
-      _saveNote();
+      await _saveNote();
     }
   }
 
@@ -359,7 +384,10 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     };
   }
 
-  void _saveNote() {
+  Future<void> _saveNote() async {
+    await _stopRecordingSafelyIfNeeded(saveResult: true);
+    if (!mounted) return;
+
     final hasAnyData = _titleController.text.trim().isNotEmpty ||
         _contentController.text.trim().isNotEmpty ||
         _imagePaths.isNotEmpty ||
@@ -425,6 +453,10 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     );
 
     if (time == null || !mounted) return;
+    final now = DateTime.now();
+    final candidate = DateTime(now.year, now.month, now.day, time.hour, time.minute);
+    final bool isTomorrow = candidate.isBefore(now);
+
     final ok = await NotificationService.scheduleAlarmReminder(
       context: context,
       time: time,
@@ -435,7 +467,11 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     if (ok && mounted) {
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('تم ضبط المنبه في ${time.format(context)}')),
+        SnackBar(
+          content: Text(
+            'تم ضبط المنبه ${isTomorrow ? 'غداً' : 'اليوم'} الساعة ${time.format(context)}',
+          ),
+        ),
       );
     }
   }
@@ -494,9 +530,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
 
   void _pickColor() {
     final pal = OnyxPalette.of(OnyxSettings.isDark);
-    Color currentColor = _styleForTitle
-        ? resolveAdaptiveNoteColor(_customTitleColor, pal)
-        : resolveAdaptiveNoteColor(_customContentColor, pal, isContent: true);
+    final Color currentColor =
+        resolveAdaptiveNoteColor(_customContentColor ?? _customTitleColor, pal);
 
     showDialog(
       context: context,
@@ -506,20 +541,14 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
           borderRadius: BorderRadius.circular(22),
           side: BorderSide(color: pal.glassBorder),
         ),
-        title: Text(
-          _styleForTitle ? 'اختر لون العنوان' : 'اختر لون النص',
-          style: TextStyle(color: pal.textPrimary),
-        ),
+        title: Text('اختر لون الملاحظة', style: TextStyle(color: pal.textPrimary)),
         content: SingleChildScrollView(
           child: ColorPicker(
             pickerColor: currentColor,
             onColorChanged: (color) {
               setState(() {
-                if (_styleForTitle) {
-                  _customTitleColor = color.value;
-                } else {
-                  _customContentColor = color.value;
-                }
+                _customTitleColor = color.value;
+                _customContentColor = color.value;
               });
             },
             pickerAreaHeightPercent: 0.7,
@@ -532,11 +561,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
           TextButton(
             onPressed: () {
               setState(() {
-                if (_styleForTitle) {
-                  _customTitleColor = null;
-                } else {
-                  _customContentColor = null;
-                }
+                _customTitleColor = null;
+                _customContentColor = null;
               });
               Navigator.pop(ctx);
             },
@@ -591,37 +617,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      const SizedBox(height: 12),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          ChoiceChip(
-                            label: const Text('العنوان'),
-                            selected: _styleForTitle,
-                            onSelected: (_) =>
-                                setModalState(() => _styleForTitle = true),
-                            selectedColor: pal.accent,
-                            labelStyle: TextStyle(
-                              color: _styleForTitle
-                                  ? pal.onAccent
-                                  : pal.textPrimary,
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          ChoiceChip(
-                            label: const Text('النص'),
-                            selected: !_styleForTitle,
-                            onSelected: (_) =>
-                                setModalState(() => _styleForTitle = false),
-                            selectedColor: pal.accent,
-                            labelStyle: TextStyle(
-                              color: !_styleForTitle
-                                  ? pal.onAccent
-                                  : pal.textPrimary,
-                            ),
-                          ),
-                        ],
-                      ),
                       const SizedBox(height: 16),
                       SizedBox(
                         height: 76,
@@ -672,22 +667,18 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        'حجم الخط (${(_styleForTitle ? _titleFontSize : _contentFontSize).toInt()})',
+                        'حجم الخط (${_contentFontSize.toInt()})',
                         style: TextStyle(color: pal.textPrimary),
                       ),
                       Slider(
-                        value:
-                            _styleForTitle ? _titleFontSize : _contentFontSize,
+                        value: _contentFontSize.clamp(12.0, 32.0),
                         min: 12,
-                        max: 40,
+                        max: 32,
                         activeColor: pal.accent,
                         onChanged: (val) {
                           setModalState(() {
-                            if (_styleForTitle) {
-                              _titleFontSize = val;
-                            } else {
-                              _contentFontSize = val;
-                            }
+                            _contentFontSize = val;
+                            _titleFontSize = (val + 6.0).clamp(18.0, 38.0);
                           });
                           setState(() {});
                         },
@@ -1735,7 +1726,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
               ),
               actions: [
                 IconButton(
-                  tooltip: _isReadingMode ? 'وضع التحرير' : 'وضع القراءة والروابط',
+                  tooltip:
+                      _isReadingMode ? 'وضع التحرير' : 'وضع القراءة والروابط',
                   icon: Icon(
                     _isReadingMode
                         ? Icons.edit_outlined
@@ -2220,15 +2212,40 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                                           fontSize: 13.5,
                                         ),
                                       ),
-                                      if (_checklist.isNotEmpty)
-                                        Text(
-                                          '${((doneCount / _checklist.length) * 100).round()}%',
-                                          style: TextStyle(
-                                            color: pal.textSecondary,
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
+                                      Row(
+                                        children: [
+                                          if (doneCount > 0)
+                                            GestureDetector(
+                                              onTap: () => setState(() {
+                                                _checklist.removeWhere(
+                                                  (c) => c['done'] == true,
+                                                );
+                                              }),
+                                              child: Padding(
+                                                padding: const EdgeInsets.only(
+                                                  left: 10,
+                                                ),
+                                                child: Text(
+                                                  'حذف المكتمل',
+                                                  style: TextStyle(
+                                                    color: pal.danger,
+                                                    fontSize: 11.5,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          if (_checklist.isNotEmpty)
+                                            Text(
+                                              '${((doneCount / _checklist.length) * 100).round()}%',
+                                              style: TextStyle(
+                                                color: pal.textSecondary,
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                        ],
+                                      ),
                                     ],
                                   ),
                                   if (_checklist.isNotEmpty) ...[
