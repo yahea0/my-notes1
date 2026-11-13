@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'link_detector.dart';
 
 class CodeLanguageInfo {
   final String id;
@@ -43,16 +44,19 @@ class CodeDetector {
     final text = raw.trim();
     if (text.length < 10) return null;
 
-    // تجنب الخلط مع النصوص العربية العادية الخالية من تراكيب البرمجة
+    // إذا كان النص يحتوي على رابط واضح بدون بنية برمجية، لا تصنفه ككود
+    final textWithoutLinks = text.replaceAll(LinkDetector.urlRegex, '').trim();
+    if (textWithoutLinks.length < 8) return null;
+
     final int arabicChars =
-        RegExp(r'[\u0600-\u06FF]').allMatches(text).length;
+        RegExp(r'[\u0600-\u06FF]').allMatches(textWithoutLinks).length;
     final bool hasCodePunctuation =
-        RegExp(r'[{};=<>\[\]()]|def\s|SELECT\s|import\s|#!/').hasMatch(text);
-    if (!hasCodePunctuation && arabicChars > text.length * 0.35) {
+        RegExp(r'[{};=<>\[\]()]|def\s|SELECT\s|import\s|#!/')
+            .hasMatch(textWithoutLinks);
+    if (!hasCodePunctuation && arabicChars > textWithoutLinks.length * 0.35) {
       return null;
     }
 
-    // 1. JSON
     if ((text.startsWith('{') && text.endsWith('}')) ||
         (text.startsWith('[') && text.endsWith(']'))) {
       if (RegExp(r'"[^"]+"\s*:').hasMatch(text)) {
@@ -60,7 +64,6 @@ class CodeDetector {
       }
     }
 
-    // 2. HTML & XML
     if (RegExp(
       r'<!DOCTYPE\s+html|<html[\s>]|<div[\s>]|<script[\s>]|<body[\s>]',
       caseSensitive: false,
@@ -72,7 +75,6 @@ class CodeDetector {
       return getLanguageById('xml');
     }
 
-    // 3. PHP
     if (text.contains('<?php') ||
         (RegExp(r'\$[a-zA-Z_]\w*').hasMatch(text) && text.contains('->'))) {
       return getLanguageById('php');
@@ -83,12 +85,11 @@ class CodeDetector {
     };
 
     void add(String id, RegExp pattern, int weight) {
-      if (pattern.hasMatch(text)) {
+      if (pattern.hasMatch(textWithoutLinks)) {
         scores[id] = (scores[id] ?? 0) + weight;
       }
     }
 
-    // Dart / Flutter
     add('dart', RegExp(r"import\s+'package:flutter/|import\s+'dart:"), 6);
     add(
       'dart',
@@ -104,7 +105,6 @@ class CodeDetector {
     );
     add('dart', RegExp(r'@override'), 2);
 
-    // Python
     add('python', RegExp(r'^\s*def\s+\w+\s*\(', multiLine: true), 5);
     add(
       'python',
@@ -118,7 +118,6 @@ class CodeDetector {
     );
     add('python', RegExp(r'if\s+__name__\s*=='), 6);
 
-    // TypeScript & JavaScript
     add('typescript', RegExp(r'\b(interface|type|enum)\s+[A-Z]\w*'), 4);
     add(
       'typescript',
@@ -139,7 +138,6 @@ class CodeDetector {
     );
     add('javascript', RegExp(r'=>'), 2);
 
-    // Kotlin
     add(
       'kotlin',
       RegExp(r'\b(fun\s+\w+|override\s+fun|companion\s+object|data\s+class)\b'),
@@ -148,7 +146,6 @@ class CodeDetector {
     add('kotlin', RegExp(r'\b(val|var)\s+\w+\s*[:=]'), 3);
     add('kotlin', RegExp(r'\bprintln\('), 2);
 
-    // Java
     add(
       'java',
       RegExp(r'public\s+static\s+void\s+main|System\.out\.println'),
@@ -156,7 +153,6 @@ class CodeDetector {
     );
     add('java', RegExp(r'\b(public|private|protected)\s+class\s+\w+'), 4);
 
-    // C++ / C / C#
     add(
       'cpp',
       RegExp(r'#include\s*<(iostream|vector|string|algorithm)>|std::|cout\s*<<'),
@@ -173,7 +169,6 @@ class CodeDetector {
       5,
     );
 
-    // Swift
     add(
       'swift',
       RegExp(
@@ -182,17 +177,13 @@ class CodeDetector {
       6,
     );
 
-    // Go
     add('go', RegExp(r'package\s+main|func\s+main\(\)|fmt\.Print|:='), 6);
-
-    // Rust
     add(
       'rust',
       RegExp(r'\bfn\s+\w+\(|let\s+mut\s+|println!|\bimpl\s+\w+'),
       6,
     );
 
-    // SQL
     add(
       'sql',
       RegExp(
@@ -210,7 +201,6 @@ class CodeDetector {
       3,
     );
 
-    // CSS
     add(
       'css',
       RegExp(
@@ -224,7 +214,6 @@ class CodeDetector {
       3,
     );
 
-    // Bash / Shell
     add(
       'bash',
       RegExp(
@@ -239,7 +228,6 @@ class CodeDetector {
       3,
     );
 
-    // YAML
     add(
       'yaml',
       RegExp(
@@ -249,7 +237,6 @@ class CodeDetector {
       5,
     );
 
-    // Markdown
     add('markdown', RegExp(r'^(#{1,3}\s+\S+|```)', multiLine: true), 3);
 
     String bestId = '';
@@ -304,7 +291,7 @@ class CodeSyntaxTextController extends TextEditingController {
     TextStyle? style,
     required bool withComposing,
   }) {
-    if (!syntaxEnabled || text.isEmpty) {
+    if (text.isEmpty) {
       return super.buildTextSpan(
         context: context,
         style: style,
@@ -313,6 +300,45 @@ class CodeSyntaxTextController extends TextEditingController {
     }
 
     final base = style ?? const TextStyle(fontSize: 14);
+
+    // في النص العادي: نميّز الروابط بلون سماوي واضح مع تسطير
+    if (!syntaxEnabled) {
+      final links = LinkDetector.extractLinks(text, unique: false);
+      if (links.isEmpty) {
+        return super.buildTextSpan(
+          context: context,
+          style: style,
+          withComposing: withComposing,
+        );
+      }
+
+      final Color linkColor =
+          isDarkTheme ? const Color(0xFF7CC4FF) : const Color(0xFF1D4ED8);
+      final List<InlineSpan> spans = [];
+      int pos = 0;
+
+      for (final link in links) {
+        if (link.start > pos) {
+          spans.add(TextSpan(text: text.substring(pos, link.start), style: base));
+        }
+        spans.add(
+          TextSpan(
+            text: text.substring(link.start, link.end),
+            style: base.copyWith(
+              color: linkColor,
+              decoration: TextDecoration.underline,
+              decorationColor: linkColor,
+            ),
+          ),
+        );
+        pos = link.end;
+      }
+      if (pos < text.length) {
+        spans.add(TextSpan(text: text.substring(pos), style: base));
+      }
+      return TextSpan(style: base, children: spans);
+    }
+
     final Color kwColor =
         isDarkTheme ? const Color(0xFFC792EA) : const Color(0xFF7C3AED);
     final Color typeColor =
@@ -357,7 +383,6 @@ class CodeSyntaxTextController extends TextEditingController {
     while (i < len) {
       final String ch = text[i];
 
-      // 1. تعليقات السطر الواحد
       if ((ch == '/' && i + 1 < len && text[i + 1] == '/') ||
           (ch == '-' &&
               i + 1 < len &&
@@ -375,7 +400,6 @@ class CodeSyntaxTextController extends TextEditingController {
         continue;
       }
 
-      // 2. تعليقات متعددة الأسطر /* ... */
       if (ch == '/' && i + 1 < len && text[i + 1] == '*') {
         final int close = text.indexOf('*/', i + 2);
         final int end = close == -1 ? len : close + 2;
@@ -388,7 +412,6 @@ class CodeSyntaxTextController extends TextEditingController {
         continue;
       }
 
-      // 3. النصوص " ' `
       if (ch == '"' || ch == "'" || ch == '`') {
         int j = i + 1;
         while (j < len) {
@@ -408,7 +431,6 @@ class CodeSyntaxTextController extends TextEditingController {
         continue;
       }
 
-      // 4. الوسوم والتوجيهات (@override, #include)
       if (ch == '@' || (ch == '#' && !hashCommentLang)) {
         int j = i + 1;
         while (j < len && RegExp(r'[a-zA-Z0-9_]').hasMatch(text[j])) {
@@ -423,7 +445,6 @@ class CodeSyntaxTextController extends TextEditingController {
         continue;
       }
 
-      // 5. وسوم HTML / XML
       if (ch == '<' &&
           (languageId == 'html' || languageId == 'xml') &&
           i + 1 < len &&
@@ -441,7 +462,6 @@ class CodeSyntaxTextController extends TextEditingController {
         continue;
       }
 
-      // 6. الأرقام
       if (RegExp(r'[0-9]').hasMatch(ch)) {
         int j = i + 1;
         while (j < len && RegExp(r'[0-9.xXa-fA-F_]').hasMatch(text[j])) {
@@ -452,7 +472,6 @@ class CodeSyntaxTextController extends TextEditingController {
         continue;
       }
 
-      // 7. الكلمات والمُعرّفات
       if (RegExp(r'[a-zA-Z_]').hasMatch(ch)) {
         int j = i + 1;
         while (j < len && RegExp(r'[a-zA-Z0-9_]').hasMatch(text[j])) {
@@ -476,14 +495,12 @@ class CodeSyntaxTextController extends TextEditingController {
         continue;
       }
 
-      // 8. الأقواس والرموز البرمجية
       if (RegExp(r'[{}()\[\]=><+\-*/&|!:;.,?]').hasMatch(ch)) {
         addSpan(i, i + 1, base.copyWith(color: opColor));
         i++;
         continue;
       }
 
-      // 9. أي محارف أخرى
       int j = i + 1;
       while (j < len &&
           !RegExp(r'''[a-zA-Z0-9_"'`@#/<>{}()\[\]=+\-*&|!:;.,?-]''')
