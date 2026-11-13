@@ -110,13 +110,13 @@ class OnyxPalette {
         glassBorder: Colors.white.withOpacity(0.14),
         glassStrongBorder: Colors.white.withOpacity(0.32),
         textPrimary: Colors.white,
-        textSecondary: Colors.white.withOpacity(0.76),
-        textMuted: Colors.white.withOpacity(0.45),
+        textSecondary: Colors.white.withOpacity(0.78),
+        textMuted: Colors.white.withOpacity(0.46),
         accent: Colors.white,
         onAccent: const Color(0xFF08080A),
         shadowDeep: Colors.black.withOpacity(0.82),
         shadowSoft: Colors.white.withOpacity(0.07),
-        chipBg: Colors.white.withOpacity(0.07),
+        chipBg: Colors.white.withOpacity(0.08),
         divider: Colors.white.withOpacity(0.10),
         inputFill: Colors.white.withOpacity(0.05),
         danger: const Color(0xFFFF5C6C),
@@ -131,18 +131,18 @@ class OnyxPalette {
       cardTop: Colors.white.withOpacity(0.95),
       cardBottom: const Color(0xFFE9EBF2).withOpacity(0.76),
       glassHighlight: Colors.white,
-      glassBorder: Colors.black.withOpacity(0.09),
-      glassStrongBorder: Colors.black.withOpacity(0.22),
+      glassBorder: Colors.black.withOpacity(0.10),
+      glassStrongBorder: Colors.black.withOpacity(0.24),
       textPrimary: const Color(0xFF0B0B0E),
       textSecondary: const Color(0xFF3A3B42),
-      textMuted: const Color(0xFF71737E),
+      textMuted: const Color(0xFF6B6E79),
       accent: const Color(0xFF0B0B0E),
       onAccent: Colors.white,
       shadowDeep: const Color(0xFF10121A).withOpacity(0.14),
       shadowSoft: Colors.white.withOpacity(0.92),
-      chipBg: Colors.black.withOpacity(0.05),
+      chipBg: Colors.black.withOpacity(0.06),
       divider: Colors.black.withOpacity(0.08),
-      inputFill: Colors.black.withOpacity(0.04),
+      inputFill: Colors.black.withOpacity(0.045),
       danger: const Color(0xFFD92D3E),
     );
   }
@@ -154,15 +154,15 @@ Color resolveAdaptiveNoteColor(
   bool isContent = false,
 }) {
   if (rawColor == null) {
-    return isContent ? pal.textPrimary.withOpacity(0.86) : pal.textPrimary;
+    return isContent ? pal.textPrimary.withOpacity(0.88) : pal.textPrimary;
   }
   final int whiteVal = Colors.white.value;
   final int blackVal = Colors.black.value;
   if (!pal.isDark && rawColor == whiteVal) {
-    return isContent ? pal.textPrimary.withOpacity(0.86) : pal.textPrimary;
+    return isContent ? pal.textPrimary.withOpacity(0.88) : pal.textPrimary;
   }
   if (pal.isDark && (rawColor == blackVal || rawColor == 0xFF0B0B0E)) {
-    return isContent ? pal.textPrimary.withOpacity(0.86) : pal.textPrimary;
+    return isContent ? pal.textPrimary.withOpacity(0.88) : pal.textPrimary;
   }
   return Color(rawColor);
 }
@@ -200,4 +200,28 @@ class OnyxSettings {
   static bool get hideLocked =>
       _box.get('hideLocked', defaultValue: true) as bool;
   static Future<void> setHideLocked(bool val) => _box.put('hideLocked', val);
+
+  static bool get useTrash =>
+      _box.get('useTrash', defaultValue: true) as bool;
+  static Future<void> setUseTrash(bool val) => _box.put('useTrash', val);
+
+  static bool get confirmOnExit =>
+      _box.get('confirmOnExit', defaultValue: true) as bool;
+  static Future<void> setConfirmOnExit(bool val) =>
+      _box.put('confirmOnExit', val);
+
+  static bool get appLockEnabled =>
+      _box.get('appLockEnabled', defaultValue: false) as bool;
+  static Future<void> setAppLockEnabled(bool val) =>
+      _box.put('appLockEnabled', val);
+
+  static String get defaultFont =>
+      _box.get('defaultFont', defaultValue: 'Tahoma') as String;
+  static Future<void> setDefaultFont(String val) =>
+      _box.put('defaultFont', val);
+
+  static double get defaultContentSize =>
+      (_box.get('defaultContentSize', defaultValue: 16.0) as num).toDouble();
+  static Future<void> setDefaultContentSize(double val) =>
+      _box.put('defaultContentSize', val);
 }
