@@ -1206,25 +1206,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   ),
                   ListTile(
                     leading: Icon(
-                      _isCodeActive ? Icons.notes : Icons.code,
-                      color: pal.textPrimary,
-                    ),
-                    title: Text(
-                      _isCodeActive
-                          ? 'إيقاف وضع المحرر البرمجي'
-                          : 'تفعيل وضع المحرر البرمجي (ترقيم وتلوين)',
-                      style: TextStyle(color: pal.textPrimary),
-                    ),
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      setState(() {
-                        _codeMode = _isCodeActive ? 'off' : 'on';
-                        _refreshCodeDetection();
-                      });
-                    },
-                  ),
-                  ListTile(
-                    leading: Icon(
                       _isLocked ? Icons.lock_open : Icons.lock_outline,
                       color: pal.textPrimary,
                     ),
@@ -1747,92 +1728,61 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
             resizeToAvoidBottomInset: true,
             appBar: AppBar(
               backgroundColor: Colors.transparent,
-              centerTitle: false,
-              titleSpacing: 0,
               iconTheme: IconThemeData(color: pal.textPrimary),
               leading: IconButton(
                 icon: const Icon(Icons.arrow_back),
                 onPressed: _handleBackPressed,
               ),
-              title: FittedBox(
-                fit: BoxFit.scaleDown,
-                alignment: AlignmentDirectional.centerStart,
-                child: Text(
-                  widget.note == null ? 'ملاحظة جديدة' : 'تعديل الملاحظة',
-                  style: TextStyle(
-                    color: pal.textPrimary,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18.5,
-                  ),
-                ),
-              ),
               actions: [
                 IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 34, minHeight: 34),
-                  padding: EdgeInsets.zero,
                   tooltip: _isReadingMode ? 'وضع التحرير' : 'وضع القراءة والروابط',
                   icon: Icon(
                     _isReadingMode
                         ? Icons.edit_outlined
                         : Icons.visibility_outlined,
-                    size: 20,
+                    size: 21,
                     color: pal.textPrimary,
                   ),
                   onPressed: () =>
                       setState(() => _isReadingMode = !_isReadingMode),
                 ),
                 IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 34, minHeight: 34),
-                  padding: EdgeInsets.zero,
                   tooltip: 'تراجع',
                   icon: Icon(
                     Icons.undo,
-                    size: 20,
+                    size: 21,
                     color: _undoStack.isEmpty ? pal.textMuted : pal.textPrimary,
                   ),
                   onPressed: _undoStack.isEmpty ? null : _undo,
                 ),
                 IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 34, minHeight: 34),
-                  padding: EdgeInsets.zero,
                   tooltip: 'إعادة',
                   icon: Icon(
                     Icons.redo,
-                    size: 20,
+                    size: 21,
                     color: _redoStack.isEmpty ? pal.textMuted : pal.textPrimary,
                   ),
                   onPressed: _redoStack.isEmpty ? null : _redo,
                 ),
                 IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 34, minHeight: 34),
-                  padding: EdgeInsets.zero,
                   tooltip: _isLocked ? 'مقفلة' : 'قفل الملاحظة',
                   icon: Icon(
                     _isLocked ? Icons.lock : Icons.lock_open_outlined,
-                    size: 19,
+                    size: 20,
                     color: _isLocked ? pal.textPrimary : pal.textMuted,
                   ),
                   onPressed: () => setState(() => _isLocked = !_isLocked),
                 ),
                 IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 34, minHeight: 34),
-                  padding: EdgeInsets.zero,
                   tooltip: 'تثبيت',
                   icon: Icon(
                     _isPinned ? Icons.push_pin : Icons.push_pin_outlined,
-                    size: 19,
+                    size: 20,
                     color: _isPinned ? Colors.amber : pal.textPrimary,
                   ),
                   onPressed: () => setState(() => _isPinned = !_isPinned),
                 ),
                 IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 38, minHeight: 38),
                   tooltip: 'حفظ',
                   icon: Icon(Icons.check, color: pal.textPrimary),
                   onPressed: _saveNote,
@@ -2404,6 +2354,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                                   decoration: InputDecoration(
                                     hintText:
                                         'اكتب ملاحظتك هنا أو الصق أي رابط فيديو / تواصل أو كود برمجي...',
+                                    hintMaxLines: 2,
                                     hintStyle: TextStyle(color: pal.textMuted),
                                     border: InputBorder.none,
                                   ),
