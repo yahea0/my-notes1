@@ -44,6 +44,14 @@ jobs:
             fi
           done
 
+      - name: Generate Luxury App Icon
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libcairo2
+          python3 -m venv /tmp/iconenv
+          /tmp/iconenv/bin/pip install --quiet cairosvg pillow
+          /tmp/iconenv/bin/python scripts/generate_icon.py
+
       - name: Install Flutter dependencies
         run: flutter pub get
 
@@ -52,9 +60,6 @@ jobs:
 
       - name: Verify APK Launchable Activity
         run: |
-          echo "=== Merged AndroidManifest.xml ==="
-          find build/app/intermediates/merged_manifests -name "AndroidManifest.xml" -exec cat {} +
-          echo "=== AAPT2 Badging ==="
           AAPT2=$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -name aapt2 | sort -V | tail -n 1)
           "$AAPT2" dump badging build/app/outputs/flutter-apk/app-release.apk | grep -E "package:|application-label:|launchable-activity:"
           "$AAPT2" dump badging build/app/outputs/flutter-apk/app-release.apk | grep -q "launchable-activity:"
