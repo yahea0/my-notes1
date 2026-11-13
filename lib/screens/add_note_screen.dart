@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
@@ -18,6 +19,7 @@ import 'package:share_plus/share_plus.dart';
 import '../services/notification_service.dart';
 import '../theme/onyx_theme.dart';
 import '../utils/code_highlighter.dart';
+import '../utils/link_detector.dart';
 import '../widgets/luxury_3d_glass.dart';
 import 'sketch_screen.dart';
 
@@ -37,6 +39,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   final TextEditingController _tagController = TextEditingController();
   final TextEditingController _todoController = TextEditingController();
   final ScrollController _contentScrollController = ScrollController();
+  final List<TapGestureRecognizer> _linkRecognizers = [];
 
   String _selectedCategory = 'عام';
   int? _customTitleColor;
@@ -51,18 +54,15 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   List<String> _tags = [];
   List<Map<String, dynamic>> _checklist = [];
 
-  // وضع الكود البرمجي وتلوينه التلقائي
-  String _codeMode = 'auto'; // auto | on | off
+  String _codeMode = 'auto';
   String _manualLangId = '';
   CodeLanguageInfo? _detectedLang;
+  bool _isReadingMode = false;
 
-  // التراجع والإعادة للنص
   final List<String> _undoStack = [];
   final List<String> _redoStack = [];
   String _lastCommittedText = '';
   bool _applyingHistory = false;
-
-  // بصمة الحالة الأولية لاكتشاف التعديلات غير المحفوظة عند الخروج
   late String _initialSignature;
 
   String _calcDisplay = '0';
@@ -146,8 +146,16 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     });
   }
 
+  void _disposeLinkRecognizers() {
+    for (final r in _linkRecognizers) {
+      r.dispose();
+    }
+    _linkRecognizers.clear();
+  }
+
   @override
   void dispose() {
+    _disposeLinkRecognizers();
     _recordTimer?.cancel();
     _completeSub?.cancel();
     _durationSub?.cancel();
@@ -271,10 +279,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
         ),
         title: Text(
           'هل تريد حفظ الملاحظة؟',
-          style: TextStyle(
-            color: pal.textPrimary,
-            fontWeight: FontWeight.bold,
-          ),
+          style: TextStyle(color: pal.textPrimary, fontWeight: FontWeight.bold),
         ),
         content: Text(
           'لديك تعديلات لم تُحفظ بعد. اختر حفظ وخروج أو إلغاء لتجاهلها.',
@@ -285,10 +290,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
             onPressed: () => Navigator.pop(ctx, 'discard'),
             child: Text(
               'إلغاء',
-              style: TextStyle(
-                color: pal.danger,
-                fontWeight: FontWeight.bold,
-              ),
+              style: TextStyle(color: pal.danger, fontWeight: FontWeight.bold),
             ),
           ),
           ElevatedButton(
@@ -386,6 +388,15 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     );
   }
 
+  Future<void> _launchLink(String url) async {
+    final ok = await NotificationService.openExternalUrl(url);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('تعذر فتح الرابط، تأكد من صلاحية الرابط')),
+      );
+    }
+  }
+
   Future<void> _setReminder() async {
     final pal = OnyxPalette.of(OnyxSettings.isDark);
     final TimeOfDay? time = await showTimePicker(
@@ -463,6 +474,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
               if (query.isEmpty) return;
               final startIndex = _contentController.text.indexOf(query);
               if (startIndex != -1) {
+                setState(() => _isReadingMode = false);
                 _contentController.selection = TextSelection(
                   baseOffset: startIndex,
                   extentOffset: startIndex + query.length,
@@ -1058,7 +1070,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                           'C', '⌫', '%', '÷', '×', '−', '+', '(', ')', '^', '√'
                         ].contains(e);
 
-                        // تباين عالٍ ومضمون في الوضعين الداكن والمشرق
                         final Color btnBg = isEq
                             ? pal.accent
                             : isOp
@@ -1313,7 +1324,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   child: ListView(
                     children: [
                       ListTile(
-                        leading: Icon(Icons.auto_fix_high, color: pal.textPrimary),
+                        leading:
+                            Icon(Icons.auto_fix_high, color: pal.textPrimary),
                         title: Text(
                           'تعرّف تلقائي على اللغة',
                           style: TextStyle(color: pal.textPrimary),
@@ -1370,6 +1382,163 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     return clean.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
   }
 
+  Widget _buildReadableNoteArea(OnyxPalette pal, TextStyle contentStyle) {
+    _disposeLinkRecognizers();
+    final text = _contentController.text;
+    final links = LinkDetector.extractLinks(text, unique: false);
+    final Color linkColor =
+        pal.isDark ? const Color(0xFF7CC4FF) : const Color(0xFF1D4ED8);
+
+    final List<InlineSpan> spans = [];
+    int pos = 0;
+
+    for (final link in links) {
+      if (link.start > pos) {
+        spans.add(
+          TextSpan(
+            text: text.substring(pos, link.start),
+            style: contentStyle,
+          ),
+        );
+      }
+      final recognizer = TapGestureRecognizer()
+        ..onTap = () => _launchLink(link.normalizedUrl);
+      _linkRecognizers.add(recognizer);
+
+      spans.add(
+        TextSpan(
+          text: text.substring(link.start, link.end),
+          recognizer: recognizer,
+          style: contentStyle.copyWith(
+            color: linkColor,
+            decoration: TextDecoration.underline,
+            decorationColor: linkColor,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      );
+      pos = link.end;
+    }
+
+    if (pos < text.length) {
+      spans.add(TextSpan(text: text.substring(pos), style: contentStyle));
+    }
+
+    return Onyx3DGlassCard(
+      padding: const EdgeInsets.all(16),
+      borderRadius: 24,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 220),
+        child: SelectableText.rich(
+          TextSpan(
+            style: contentStyle,
+            children: spans.isEmpty
+                ? [TextSpan(text: text.isEmpty ? 'ملاحظة فارغة' : text)]
+                : spans,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetectedLinksSection(
+    OnyxPalette pal,
+    List<DetectedLink> links,
+  ) {
+    if (links.isEmpty) return const SizedBox.shrink();
+
+    return Onyx3DGlassCard(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(12),
+      borderRadius: 20,
+      isHighlighted: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.link_rounded, size: 17, color: pal.textPrimary),
+              const SizedBox(width: 6),
+              Text(
+                'الروابط والمقاطع المكتشفة (${links.length})',
+                style: TextStyle(
+                  color: pal.textPrimary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ...links.map(
+            (link) => InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => _launchLink(link.normalizedUrl),
+              child: Container(
+                margin: const EdgeInsets.only(bottom: 7),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 9,
+                ),
+                decoration: BoxDecoration(
+                  color: pal.chipBg,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: pal.glassBorder),
+                ),
+                child: Row(
+                  children: [
+                    Icon(link.icon, color: pal.textPrimary, size: 22),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${link.platformName} · ${link.categoryLabel}',
+                            style: TextStyle(
+                              color: pal.textPrimary,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            link.normalizedUrl,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textDirection: TextDirection.ltr,
+                            style: TextStyle(
+                              color: pal.textMuted,
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'نسخ الرابط',
+                      icon: Icon(Icons.copy, size: 17, color: pal.textSecondary),
+                      onPressed: () {
+                        Clipboard.setData(
+                          ClipboardData(text: link.normalizedUrl),
+                        );
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('تم نسخ الرابط')),
+                        );
+                      },
+                    ),
+                    Icon(Icons.open_in_new, size: 17, color: pal.textPrimary),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildCodeEditorArea(OnyxPalette pal) {
     final lines = _contentController.text.split('\n');
     final int lineCount = math.max(1, lines.length);
@@ -1400,7 +1569,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // شريط أدوات المبرمجين السريع
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
@@ -1416,9 +1584,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                     .map(
                       (sym) => GestureDetector(
                         onTap: () {
-                          final val = sym == 'Tab'
-                              ? '  '
-                              : sym.replaceAll(' ', '');
+                          final val =
+                              sym == 'Tab' ? '  ' : sym.replaceAll(' ', '');
                           _insertTextAtCursor(val);
                         },
                         child: Container(
@@ -1448,8 +1615,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
               ),
             ),
           ),
-
-          // محرر الأكواد مع ترقيم الأسطر المتزامن والاتجاه LTR
           Directionality(
             textDirection: TextDirection.ltr,
             child: LayoutBuilder(
@@ -1562,11 +1727,14 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
         );
 
         final int words = _wordCount(_contentController.text);
-        final int linesCount =
-            _contentController.text.isEmpty ? 0 : _contentController.text.split('\n').length;
+        final int linesCount = _contentController.text.isEmpty
+            ? 0
+            : _contentController.text.split('\n').length;
         final int doneCount =
             _checklist.where((c) => c['done'] == true).length;
         final CodeLanguageInfo? activeLang = _activeLanguage;
+        final List<DetectedLink> detectedLinks =
+            LinkDetector.extractLinks(_contentController.text);
 
         return PopScope(
           canPop: false,
@@ -1594,14 +1762,29 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   style: TextStyle(
                     color: pal.textPrimary,
                     fontWeight: FontWeight.bold,
-                    fontSize: 19,
+                    fontSize: 18.5,
                   ),
                 ),
               ),
               actions: [
                 IconButton(
                   constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                      const BoxConstraints(minWidth: 34, minHeight: 34),
+                  padding: EdgeInsets.zero,
+                  tooltip: _isReadingMode ? 'وضع التحرير' : 'وضع القراءة والروابط',
+                  icon: Icon(
+                    _isReadingMode
+                        ? Icons.edit_outlined
+                        : Icons.visibility_outlined,
+                    size: 20,
+                    color: pal.textPrimary,
+                  ),
+                  onPressed: () =>
+                      setState(() => _isReadingMode = !_isReadingMode),
+                ),
+                IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 34, minHeight: 34),
                   padding: EdgeInsets.zero,
                   tooltip: 'تراجع',
                   icon: Icon(
@@ -1613,7 +1796,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                 ),
                 IconButton(
                   constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                      const BoxConstraints(minWidth: 34, minHeight: 34),
                   padding: EdgeInsets.zero,
                   tooltip: 'إعادة',
                   icon: Icon(
@@ -1625,31 +1808,31 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                 ),
                 IconButton(
                   constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                      const BoxConstraints(minWidth: 34, minHeight: 34),
                   padding: EdgeInsets.zero,
                   tooltip: _isLocked ? 'مقفلة' : 'قفل الملاحظة',
                   icon: Icon(
                     _isLocked ? Icons.lock : Icons.lock_open_outlined,
-                    size: 20,
+                    size: 19,
                     color: _isLocked ? pal.textPrimary : pal.textMuted,
                   ),
                   onPressed: () => setState(() => _isLocked = !_isLocked),
                 ),
                 IconButton(
                   constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                      const BoxConstraints(minWidth: 34, minHeight: 34),
                   padding: EdgeInsets.zero,
                   tooltip: 'تثبيت',
                   icon: Icon(
                     _isPinned ? Icons.push_pin : Icons.push_pin_outlined,
-                    size: 20,
+                    size: 19,
                     color: _isPinned ? Colors.amber : pal.textPrimary,
                   ),
                   onPressed: () => setState(() => _isPinned = !_isPinned),
                 ),
                 IconButton(
                   constraints:
-                      const BoxConstraints(minWidth: 40, minHeight: 40),
+                      const BoxConstraints(minWidth: 38, minHeight: 38),
                   tooltip: 'حفظ',
                   icon: Icon(Icons.check, color: pal.textPrimary),
                   onPressed: _saveNote,
@@ -1666,7 +1849,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // شريط اللغة البرمجية المكتشفة في أعلى الملاحظة
                           if (activeLang != null)
                             Onyx3DGlassCard(
                               margin: const EdgeInsets.only(bottom: 12),
@@ -1818,6 +2000,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                               children: [
                                 TextField(
                                   controller: _titleController,
+                                  readOnly: _isReadingMode,
                                   style: titleStyle,
                                   onChanged: (_) => setState(() {}),
                                   decoration: InputDecoration(
@@ -1871,34 +2054,35 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                                         ),
                                       ),
                                     ),
-                                    SizedBox(
-                                      width: 135,
-                                      child: TextField(
-                                        controller: _tagController,
-                                        style: TextStyle(
-                                          color: pal.textPrimary,
-                                          fontSize: 12.5,
-                                        ),
-                                        decoration: InputDecoration(
-                                          isDense: true,
-                                          hintText: '+ أضف وسماً...',
-                                          hintStyle: TextStyle(
-                                            color: pal.textMuted,
-                                            fontSize: 12,
+                                    if (!_isReadingMode)
+                                      SizedBox(
+                                        width: 135,
+                                        child: TextField(
+                                          controller: _tagController,
+                                          style: TextStyle(
+                                            color: pal.textPrimary,
+                                            fontSize: 12.5,
                                           ),
-                                          border: InputBorder.none,
+                                          decoration: InputDecoration(
+                                            isDense: true,
+                                            hintText: '+ أضف وسماً...',
+                                            hintStyle: TextStyle(
+                                              color: pal.textMuted,
+                                              fontSize: 12,
+                                            ),
+                                            border: InputBorder.none,
+                                          ),
+                                          onSubmitted: (val) {
+                                            final clean =
+                                                val.trim().replaceAll('#', '');
+                                            if (clean.isNotEmpty &&
+                                                !_tags.contains(clean)) {
+                                              setState(() => _tags.add(clean));
+                                            }
+                                            _tagController.clear();
+                                          },
                                         ),
-                                        onSubmitted: (val) {
-                                          final clean =
-                                              val.trim().replaceAll('#', '');
-                                          if (clean.isNotEmpty &&
-                                              !_tags.contains(clean)) {
-                                            setState(() => _tags.add(clean));
-                                          }
-                                          _tagController.clear();
-                                        },
                                       ),
-                                    ),
                                   ],
                                 ),
                               ],
@@ -2200,9 +2384,10 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                               ),
                             ),
 
-                          // المحرر الرئيسي: برمجي متلون مع ترقيم الأسطر أو نصي عادي
                           if (_isCodeActive)
                             _buildCodeEditorArea(pal)
+                          else if (_isReadingMode)
+                            _buildReadableNoteArea(pal, contentStyle)
                           else
                             Onyx3DGlassCard(
                               padding: const EdgeInsets.all(16),
@@ -2218,13 +2403,15 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                                   onChanged: _onContentChanged,
                                   decoration: InputDecoration(
                                     hintText:
-                                        'اكتب ملاحظتك هنا أو الصق أي كود برمجي للتعرف عليه تلقائياً...',
+                                        'اكتب ملاحظتك هنا أو الصق أي رابط فيديو / تواصل أو كود برمجي...',
                                     hintStyle: TextStyle(color: pal.textMuted),
                                     border: InputBorder.none,
                                   ),
                                 ),
                               ),
                             ),
+
+                          _buildDetectedLinksSection(pal, detectedLinks),
 
                           const SizedBox(height: 10),
                           Row(
