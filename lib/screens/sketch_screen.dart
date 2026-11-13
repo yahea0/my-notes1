@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:path_provider/path_provider.dart';
 import '../theme/onyx_theme.dart';
 import '../widgets/luxury_3d_glass.dart';
@@ -77,171 +78,183 @@ class _SketchScreenState extends State<SketchScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final pal = OnyxPalette.of(OnyxSettings.isDark);
+    return ValueListenableBuilder(
+      valueListenable: Hive.box('settings').listenable(),
+      builder: (context, _, __) {
+        final pal = OnyxPalette.of(OnyxSettings.isDark);
 
-    return Scaffold(
-      backgroundColor: pal.scaffoldBg,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        title: Text(
-          'لوحة الرسم الحر',
-          style: TextStyle(color: pal.textPrimary, fontWeight: FontWeight.bold),
-        ),
-        iconTheme: IconThemeData(color: pal.textPrimary),
-        actions: [
-          IconButton(
-            tooltip: 'تراجع',
-            icon: const Icon(Icons.undo),
-            onPressed: _strokes.isEmpty
-                ? null
-                : () => setState(() => _strokes.removeLast()),
+        return Scaffold(
+          backgroundColor: pal.scaffoldBg,
+          appBar: AppBar(
+            backgroundColor: Colors.transparent,
+            title: Text(
+              'لوحة الرسم الحر',
+              style:
+                  TextStyle(color: pal.textPrimary, fontWeight: FontWeight.bold),
+            ),
+            iconTheme: IconThemeData(color: pal.textPrimary),
+            actions: [
+              IconButton(
+                tooltip: 'تراجع',
+                icon: const Icon(Icons.undo),
+                onPressed: _strokes.isEmpty
+                    ? null
+                    : () => setState(() => _strokes.removeLast()),
+              ),
+              IconButton(
+                tooltip: 'مسح اللوحة',
+                icon: const Icon(Icons.delete_outline),
+                onPressed: _strokes.isEmpty
+                    ? null
+                    : () => setState(() => _strokes.clear()),
+              ),
+              IconButton(
+                tooltip: 'حفظ وإدراج',
+                icon: _saving
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.check),
+                onPressed: _saving ? null : _saveSketch,
+              ),
+            ],
           ),
-          IconButton(
-            tooltip: 'مسح اللوحة',
-            icon: const Icon(Icons.delete_outline),
-            onPressed: _strokes.isEmpty
-                ? null
-                : () => setState(() => _strokes.clear()),
-          ),
-          IconButton(
-            tooltip: 'حفظ وإدراج',
-            icon: _saving
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.check),
-            onPressed: _saving ? null : _saveSketch,
-          ),
-        ],
-      ),
-      body: OnyxBackdrop(
-        palette: pal,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              Onyx3DGlassCard(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                borderRadius: 18,
-                child: Column(
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          body: OnyxBackdrop(
+            palette: pal,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  Onyx3DGlassCard(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
+                    borderRadius: 18,
+                    child: Column(
                       children: [
                         Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            _colorDot(Colors.white, 'أبيض', pal),
-                            const SizedBox(width: 8),
-                            _colorDot(const Color(0xFFA1A1AA), 'فضي', pal),
-                            const SizedBox(width: 8),
-                            _colorDot(const Color(0xFF0A0A0D), 'أسود', pal),
-                          ],
-                        ),
-                        GestureDetector(
-                          onTap: () {
-                            setState(() {
-                              _darkCanvas = !_darkCanvas;
-                              if (!_darkCanvas && _inkColor == Colors.white) {
-                                _inkColor = const Color(0xFF0A0A0D);
-                              } else if (_darkCanvas &&
-                                  _inkColor == const Color(0xFF0A0A0D)) {
-                                _inkColor = Colors.white;
-                              }
-                            });
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 6,
+                            Row(
+                              children: [
+                                _colorDot(Colors.white, 'أبيض', pal),
+                                const SizedBox(width: 8),
+                                _colorDot(const Color(0xFFA1A1AA), 'فضي', pal),
+                                const SizedBox(width: 8),
+                                _colorDot(const Color(0xFF0A0A0D), 'أسود', pal),
+                              ],
                             ),
-                            decoration: BoxDecoration(
-                              color: pal.chipBg,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: pal.glassBorder),
-                            ),
-                            child: Text(
-                              _darkCanvas ? 'لوحة سوداء' : 'لوحة بيضاء',
-                              style: TextStyle(
-                                color: pal.textPrimary,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
+                            GestureDetector(
+                              onTap: () {
+                                setState(() {
+                                  _darkCanvas = !_darkCanvas;
+                                  if (!_darkCanvas &&
+                                      _inkColor == Colors.white) {
+                                    _inkColor = const Color(0xFF0A0A0D);
+                                  } else if (_darkCanvas &&
+                                      _inkColor == const Color(0xFF0A0A0D)) {
+                                    _inkColor = Colors.white;
+                                  }
+                                });
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 6,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: pal.chipBg,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: pal.glassBorder),
+                                ),
+                                child: Text(
+                                  _darkCanvas ? 'لوحة سوداء' : 'لوحة بيضاء',
+                                  style: TextStyle(
+                                    color: pal.textPrimary,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
+                          ],
+                        ),
+                        Row(
+                          children: [
+                            Text(
+                              'السُمك (${_strokeWidth.toStringAsFixed(1)})',
+                              style: TextStyle(
+                                color: pal.textSecondary,
+                                fontSize: 12,
+                              ),
+                            ),
+                            Expanded(
+                              child: Slider(
+                                value: _strokeWidth,
+                                min: 1.5,
+                                max: 14.0,
+                                activeColor: pal.accent,
+                                onChanged: (v) =>
+                                    setState(() => _strokeWidth = v),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
-                    Row(
-                      children: [
-                        Text(
-                          'السُمك (${_strokeWidth.toStringAsFixed(1)})',
-                          style:
-                              TextStyle(color: pal.textSecondary, fontSize: 12),
-                        ),
-                        Expanded(
-                          child: Slider(
-                            value: _strokeWidth,
-                            min: 1.5,
-                            max: 14.0,
-                            activeColor: pal.accent,
-                            onChanged: (v) => setState(() => _strokeWidth = v),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 14),
-              Expanded(
-                child: Onyx3DGlassCard(
-                  padding: EdgeInsets.zero,
-                  borderRadius: 24,
-                  isHighlighted: true,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(24),
-                    child: RepaintBoundary(
-                      key: _repaintKey,
-                      child: GestureDetector(
-                        onPanStart: (details) {
-                          setState(() {
-                            _activeStroke = _SketchStroke(
-                              points: [details.localPosition],
-                              color: _inkColor,
-                              width: _strokeWidth,
-                            );
-                            _strokes.add(_activeStroke!);
-                          });
-                        },
-                        onPanUpdate: (details) {
-                          if (_activeStroke == null) return;
-                          setState(() {
-                            _activeStroke!.points.add(details.localPosition);
-                          });
-                        },
-                        onPanEnd: (_) => _activeStroke = null,
-                        child: Container(
-                          width: double.infinity,
-                          height: double.infinity,
-                          color: _darkCanvas
-                              ? const Color(0xFF0A0B0F)
-                              : Colors.white,
-                          child: CustomPaint(
-                            painter: _SketchPainter(strokes: _strokes),
+                  ),
+                  const SizedBox(height: 14),
+                  Expanded(
+                    child: Onyx3DGlassCard(
+                      padding: EdgeInsets.zero,
+                      borderRadius: 24,
+                      isHighlighted: true,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(24),
+                        child: RepaintBoundary(
+                          key: _repaintKey,
+                          child: GestureDetector(
+                            onPanStart: (details) {
+                              setState(() {
+                                _activeStroke = _SketchStroke(
+                                  points: [details.localPosition],
+                                  color: _inkColor,
+                                  width: _strokeWidth,
+                                );
+                                _strokes.add(_activeStroke!);
+                              });
+                            },
+                            onPanUpdate: (details) {
+                              if (_activeStroke == null) return;
+                              setState(() {
+                                _activeStroke!.points.add(details.localPosition);
+                              });
+                            },
+                            onPanEnd: (_) => _activeStroke = null,
+                            child: Container(
+                              width: double.infinity,
+                              height: double.infinity,
+                              color: _darkCanvas
+                                  ? const Color(0xFF0A0B0F)
+                                  : Colors.white,
+                              child: CustomPaint(
+                                painter: _SketchPainter(strokes: _strokes),
+                              ),
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
