@@ -164,7 +164,7 @@ class _SplashScreenState extends State<SplashScreen>
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        'سجل أفكارك.. تنظم حياتك',
+                        'سجل أفكارك... نظم حياتك',
                         style: applyArabicFont(
                           'Cairo',
                           TextStyle(
