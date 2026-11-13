@@ -1,0 +1,58 @@
+name: Build ONYX Notes APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.19.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Generate missing Android wrapper and resources
+        run: |
+          flutter create --platforms=android --org com.example --project-name my_notes /tmp/my_notes_scaffold
+          cp -f /tmp/my_notes_scaffold/android/gradlew "$GITHUB_WORKSPACE/android/gradlew"
+          cp -f /tmp/my_notes_scaffold/android/gradlew.bat "$GITHUB_WORKSPACE/android/gradlew.bat"
+          chmod +x "$GITHUB_WORKSPACE/android/gradlew"
+          mkdir -p "$GITHUB_WORKSPACE/android/gradle/wrapper"
+          cp -f /tmp/my_notes_scaffold/android/gradle/wrapper/gradle-wrapper.jar "$GITHUB_WORKSPACE/android/gradle/wrapper/gradle-wrapper.jar"
+          mkdir -p "$GITHUB_WORKSPACE/android/app/src/main/res"
+          cd /tmp/my_notes_scaffold/android/app/src/main/res && find . -type f | while read -r f; do
+            target="$GITHUB_WORKSPACE/android/app/src/main/res/$f"
+            if [ ! -f "$target" ]; then
+              mkdir -p "$(dirname "$target")"
+              cp "$f" "$target"
+            fi
+          done
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Build Release APK
+        run: flutter build apk --release
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: onyx-notes-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
