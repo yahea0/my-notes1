@@ -190,6 +190,13 @@ class _Onyx3DGlassCardState extends State<Onyx3DGlassCard>
     final blur = OnyxSettings.blurSigma;
     final radius = BorderRadius.circular(widget.borderRadius);
 
+    final shouldAnimate = widget.enableShimmer && OnyxSettings.enableShimmer;
+    if (shouldAnimate && !_shimmerController.isAnimating) {
+      _shimmerController.repeat();
+    } else if (!shouldAnimate && _shimmerController.isAnimating) {
+      _shimmerController.stop();
+    }
+
     Widget content = AnimatedScale(
       scale: _pressed ? 0.982 : 1.0,
       duration: const Duration(milliseconds: 140),
@@ -257,7 +264,7 @@ class _Onyx3DGlassCardState extends State<Onyx3DGlassCard>
                     ),
                     child: widget.child,
                   ),
-                  if (widget.enableShimmer && OnyxSettings.enableShimmer)
+                  if (shouldAnimate)
                     Positioned.fill(
                       child: IgnorePointer(
                         child: AnimatedBuilder(
@@ -374,21 +381,23 @@ class _Glass3DBevelPainter extends CustomPainter {
       oldDelegate.enable3D != enable3D;
 }
 
-class OnyxSculptedPrism3D extends StatefulWidget {
+/// أيقونة دفتر ملاحظات بزمبرك مع قلم باللونين الأسود والأبيض وبروز ولمعان
+/// الحركة: يطفو الدفتر، يفتح صفحاته، يكتب القلم، يُغلق الدفتر ويوضع القلم فوقه، يتوقف ثانيتين ثم يُعيد الحركة
+class OnyxNotebook3DLogo extends StatefulWidget {
   final double size;
   final bool interactiveTilt;
 
-  const OnyxSculptedPrism3D({
+  const OnyxNotebook3DLogo({
     super.key,
-    this.size = 220,
+    this.size = 230,
     this.interactiveTilt = true,
   });
 
   @override
-  State<OnyxSculptedPrism3D> createState() => _OnyxSculptedPrism3DState();
+  State<OnyxNotebook3DLogo> createState() => _OnyxNotebook3DLogoState();
 }
 
-class _OnyxSculptedPrism3DState extends State<OnyxSculptedPrism3D>
+class _OnyxNotebook3DLogoState extends State<OnyxNotebook3DLogo>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   double _tiltX = 0;
@@ -397,9 +406,10 @@ class _OnyxSculptedPrism3DState extends State<OnyxSculptedPrism3D>
   @override
   void initState() {
     super.initState();
+    // 5600ms: 0.00-0.64 حركة الفتح والكتابة والإغلاق، و0.64-1.00 (~2.0 ثانية) استراحة مع لمعان
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 4200),
+      duration: const Duration(milliseconds: 5600),
     )..repeat();
   }
 
@@ -431,9 +441,9 @@ class _OnyxSculptedPrism3DState extends State<OnyxSculptedPrism3D>
       child: AnimatedBuilder(
         animation: _controller,
         builder: (context, _) {
-          final phase = _controller.value;
-          final floatY = math.sin(phase * math.pi * 2) * 7.0;
-          final autoTilt = math.sin(phase * math.pi * 2) * 0.05;
+          final t = _controller.value;
+          final floatY = math.sin(t * math.pi * 2) * 7.5;
+          final gentleYaw = math.sin(t * math.pi * 2) * 0.055;
 
           return Transform.translate(
             offset: Offset(0, floatY),
@@ -441,14 +451,14 @@ class _OnyxSculptedPrism3DState extends State<OnyxSculptedPrism3D>
               alignment: Alignment.center,
               transform: Matrix4.identity()
                 ..setEntry(3, 2, 0.0014)
-                ..rotateX(_tiltX + autoTilt * 0.5)
-                ..rotateY(_tiltY + autoTilt),
+                ..rotateX(_tiltX - 0.10)
+                ..rotateY(_tiltY + gentleYaw),
               child: SizedBox(
                 width: widget.size,
                 height: widget.size,
                 child: CustomPaint(
-                  painter: _SculptedPrismPainter(
-                    phase: phase,
+                  painter: _SpiralNotebookPenPainter(
+                    t: t,
                     isDark: pal.isDark,
                     enableShimmer: OnyxSettings.enableShimmer,
                   ),
@@ -462,13 +472,13 @@ class _OnyxSculptedPrism3DState extends State<OnyxSculptedPrism3D>
   }
 }
 
-class _SculptedPrismPainter extends CustomPainter {
-  final double phase;
+class _SpiralNotebookPenPainter extends CustomPainter {
+  final double t;
   final bool isDark;
   final bool enableShimmer;
 
-  const _SculptedPrismPainter({
-    required this.phase,
+  const _SpiralNotebookPenPainter({
+    required this.t,
     required this.isDark,
     required this.enableShimmer,
   });
@@ -477,234 +487,425 @@ class _SculptedPrismPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final w = size.width;
     final h = size.height;
-    final cx = w * 0.48;
-    final cy = h * 0.50;
 
+    // تقسيم مراحل الأنيميشن
+    double openFactor = 0.0;
+    double writeFactor = 0.0;
+    double penRestFactor = 1.0;
+
+    if (t < 0.18) {
+      // فتح الدفتر
+      openFactor = Curves.easeInOutCubic.transform(t / 0.18);
+      writeFactor = 0.0;
+      penRestFactor = 1.0 - openFactor;
+    } else if (t < 0.48) {
+      // الدفتر مفتوح والقلم يكتب في الصفحة
+      openFactor = 1.0;
+      writeFactor = Curves.easeInOut.transform((t - 0.18) / 0.30);
+      penRestFactor = 0.0;
+    } else if (t < 0.64) {
+      // إغلاق الدفتر ووضع القلم فوقه
+      final closeP = Curves.easeInOutCubic.transform((t - 0.48) / 0.16);
+      openFactor = 1.0 - closeP;
+      writeFactor = 1.0;
+      penRestFactor = closeP;
+    } else {
+      // ثبات ثانيتين مع لمعان وتطواف
+      openFactor = 0.0;
+      writeFactor = 0.0;
+      penRestFactor = 1.0;
+    }
+
+    // إزاحة أفقية بسيطة عند الفتح لإبقاء الدفتر متمركزًا بصريًا
+    final double bookW = w * 0.44;
+    final double bookH = h * 0.58;
+    final double spineX = w * 0.28 + (openFactor * w * 0.22);
+    final double bookTop = h * 0.20;
+    final double bookBottom = bookTop + bookH;
+    final double cornerR = w * 0.045;
+
+    // 1. هالة خفيفة خلف الدفتر
     final haloPaint = Paint()
       ..shader = RadialGradient(
         colors: [
-          (isDark ? Colors.white : Colors.black).withOpacity(isDark ? 0.16 : 0.09),
+          (isDark ? Colors.white : Colors.black).withOpacity(isDark ? 0.13 : 0.08),
           Colors.transparent,
         ],
-      ).createShader(Rect.fromCircle(center: Offset(cx, cy), radius: w * 0.48));
-    canvas.drawCircle(Offset(cx, cy), w * 0.48, haloPaint);
+      ).createShader(Rect.fromCircle(center: Offset(w * 0.5, h * 0.5), radius: w * 0.46));
+    canvas.drawCircle(Offset(w * 0.5, h * 0.5), w * 0.46, haloPaint);
 
+    // 2. ظل ثلاثي الأبعاد أسفل الدفتر
     final shadowPaint = Paint()
       ..color = Colors.black.withOpacity(isDark ? 0.65 : 0.18)
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 18);
     canvas.drawOval(
       Rect.fromCenter(
-        center: Offset(cx, h * 0.89),
-        width: w * 0.56,
-        height: h * 0.10,
+        center: Offset(spineX + bookW * 0.48 - openFactor * bookW * 0.3, h * 0.87),
+        width: bookW * (1.05 + openFactor * 0.65),
+        height: h * 0.09,
       ),
       shadowPaint,
     );
 
-    canvas.save();
-    canvas.translate(cx, cy);
-    canvas.rotate(-0.35);
-    final ringPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = w * 0.045
-      ..shader = LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: isDark
-            ? [
-                Colors.white.withOpacity(0.40),
-                Colors.white.withOpacity(0.05),
-                Colors.white.withOpacity(0.25),
-              ]
-            : [
-                Colors.white,
-                Colors.black.withOpacity(0.18),
-                Colors.white,
-              ],
-      ).createShader(Rect.fromCenter(center: Offset.zero, width: w * 0.72, height: h * 0.34));
-    canvas.drawOval(
-      Rect.fromCenter(center: Offset.zero, width: w * 0.72, height: h * 0.32),
-      ringPaint,
+    // 3. الغلاف الخلفي وسماكة الورق ثلاثية الأبعاد
+    final double depthX = w * 0.025;
+    final double depthY = h * 0.025;
+    final backCoverRect = RRect.fromRectAndCorners(
+      Rect.fromLTWH(spineX, bookTop + depthY, bookW + depthX, bookH),
+      topRight: Radius.circular(cornerR),
+      bottomRight: Radius.circular(cornerR),
+      topLeft: Radius.circular(cornerR * 0.35),
+      bottomLeft: Radius.circular(cornerR * 0.35),
     );
-    canvas.restore();
+    canvas.drawRRect(
+      backCoverRect,
+      Paint()..color = const Color(0xFF0A0A0D),
+    );
+    canvas.drawRRect(
+      backCoverRect,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.0
+        ..color = Colors.white.withOpacity(0.28),
+    );
 
-    final topPoint = Offset(cx, h * 0.14);
-    final midCenter = Offset(cx, h * 0.46);
-    final leftTop = Offset(w * 0.20, h * 0.29);
-    final rightTop = Offset(w * 0.76, h * 0.29);
-    final leftBottom = Offset(w * 0.20, h * 0.68);
-    final rightBottom = Offset(w * 0.76, h * 0.68);
-    final bottomPoint = Offset(cx, h * 0.83);
+    // حواف صفحات الورق البيضاء (بروز الصفحات الجانبية والسفلية)
+    final pageBlockRect = RRect.fromRectAndCorners(
+      Rect.fromLTWH(spineX, bookTop + depthY * 0.45, bookW + depthX * 0.55, bookH),
+      topRight: Radius.circular(cornerR * 0.85),
+      bottomRight: Radius.circular(cornerR * 0.85),
+    );
+    canvas.drawRRect(
+      pageBlockRect,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: const [Color(0xFFE9EBF0), Color(0xFFC5C9D4)],
+        ).createShader(pageBlockRect.outerRect),
+    );
 
-    final topFace = Path()
-      ..moveTo(topPoint.dx, topPoint.dy)
-      ..lineTo(rightTop.dx, rightTop.dy)
-      ..lineTo(midCenter.dx, midCenter.dy)
-      ..lineTo(leftTop.dx, leftTop.dy)
+    // الصفحة اليمنى (البيضاء) التي يكتب عليها القلم
+    final rightPageRect = RRect.fromRectAndCorners(
+      Rect.fromLTWH(spineX, bookTop, bookW, bookH),
+      topRight: Radius.circular(cornerR),
+      bottomRight: Radius.circular(cornerR),
+      topLeft: Radius.circular(cornerR * 0.25),
+      bottomLeft: Radius.circular(cornerR * 0.25),
+    );
+    canvas.drawRRect(
+      rightPageRect,
+      Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFFFFFFFF), Color(0xFFF0F2F7)],
+        ).createShader(rightPageRect.outerRect),
+    );
+
+    // سطور مسطّرة خفيفة على الصفحة اليمنى
+    final rulePaint = Paint()
+      ..color = Colors.black.withOpacity(0.09)
+      ..strokeWidth = 1.0;
+    for (int i = 1; i <= 5; i++) {
+      final ly = bookTop + bookH * (0.20 + i * 0.13);
+      canvas.drawLine(
+        Offset(spineX + bookW * 0.14, ly),
+        Offset(spineX + bookW * 0.86, ly),
+        rulePaint,
+      );
+    }
+
+    // خطوط الحبر المرسومة أثناء الكتابة (تظهر في الصفحة المفتوحة)
+    Offset activeNibPoint = Offset(spineX + bookW * 0.22, bookTop + bookH * 0.33);
+    if (openFactor > 0.25) {
+      final inkPaint = Paint()
+        ..color = const Color(0xFF101116)
+        ..strokeWidth = w * 0.013
+        ..strokeCap = StrokeCap.round;
+
+      final double l1 = (writeFactor * 3.0).clamp(0.0, 1.0);
+      final double l2 = ((writeFactor - 0.33) * 3.0).clamp(0.0, 1.0);
+      final double l3 = ((writeFactor - 0.66) * 3.0).clamp(0.0, 1.0);
+
+      final y1 = bookTop + bookH * 0.33 - 3;
+      final y2 = bookTop + bookH * 0.46 - 3;
+      final y3 = bookTop + bookH * 0.59 - 3;
+      final xStart = spineX + bookW * 0.16;
+      final xMax = bookW * 0.68;
+
+      if (l1 > 0) {
+        final endX = xStart + xMax * l1;
+        canvas.drawLine(Offset(xStart, y1), Offset(endX, y1), inkPaint);
+        activeNibPoint = Offset(endX, y1);
+      }
+      if (l2 > 0) {
+        final endX = xStart + (xMax * 0.85) * l2;
+        canvas.drawLine(Offset(xStart, y2), Offset(endX, y2), inkPaint);
+        activeNibPoint = Offset(endX, y2);
+      }
+      if (l3 > 0) {
+        final endX = xStart + (xMax * 0.58) * l3;
+        canvas.drawLine(Offset(xStart, y3), Offset(endX, y3), inkPaint);
+        activeNibPoint = Offset(endX, y3);
+      }
+    }
+
+    // 4. الغلاف الأمامي المتحرك حول الزمبرك (من مغلق لليمين إلى مفتوح لليسار)
+    final double angle = openFactor * math.pi * 0.92;
+    final double cosA = math.cos(angle); // 1 مغلق -> -0.96 مفتوح لليسار
+    final double coverEdgeX = spineX + bookW * cosA;
+    final double liftY = math.sin(angle) * (h * 0.045);
+
+    final coverPath = Path()
+      ..moveTo(spineX, bookTop)
+      ..lineTo(coverEdgeX, bookTop - liftY)
+      ..lineTo(coverEdgeX, bookBottom - liftY)
+      ..lineTo(spineX, bookBottom)
       ..close();
 
-    final leftFace = Path()
-      ..moveTo(leftTop.dx, leftTop.dy)
-      ..lineTo(midCenter.dx, midCenter.dy)
-      ..lineTo(bottomPoint.dx, bottomPoint.dy)
-      ..lineTo(leftBottom.dx, leftBottom.dy)
-      ..close();
-
-    final rightFace = Path()
-      ..moveTo(midCenter.dx, midCenter.dy)
-      ..lineTo(rightTop.dx, rightTop.dy)
-      ..lineTo(rightBottom.dx, rightBottom.dy)
-      ..lineTo(bottomPoint.dx, bottomPoint.dy)
-      ..close();
-
+    final bool showingInnerCover = cosA < 0;
     canvas.drawPath(
-      topFace,
+      coverPath,
       Paint()
         ..shader = LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: isDark
-              ? [Colors.white.withOpacity(0.38), Colors.white.withOpacity(0.12)]
-              : [Colors.white, const Color(0xFFDADCE4)],
-        ).createShader(topFace.getBounds()),
+          colors: showingInnerCover
+              ? [const Color(0xFFE7E9F0), const Color(0xFFD0D4DF)]
+              : [const Color(0xFF23252E), const Color(0xFF0A0A0D)],
+        ).createShader(coverPath.getBounds()),
     );
 
+    // بطاقة بيضاء أنيقة وسط الغلاف الأمامي عند الإغلاق
+    if (!showingInnerCover && cosA > 0.28) {
+      final plateW = bookW * 0.56 * cosA;
+      final plateH = bookH * 0.24;
+      final plateCenterX = spineX + bookW * 0.54 * cosA;
+      final plateCenterY = bookTop + bookH * 0.34 - liftY * 0.5;
+      final plate = RRect.fromRectAndRadius(
+        Rect.fromCenter(
+          center: Offset(plateCenterX, plateCenterY),
+          width: plateW,
+          height: plateH,
+        ),
+        Radius.circular(w * 0.025),
+      );
+      canvas.drawRRect(
+        plate,
+        Paint()..color = Colors.white.withOpacity(0.92),
+      );
+      canvas.drawLine(
+        Offset(plateCenterX - plateW * 0.3, plateCenterY - 3),
+        Offset(plateCenterX + plateW * 0.3, plateCenterY - 3),
+        Paint()
+          ..color = const Color(0xFF0B0B0E)
+          ..strokeWidth = 2.0
+          ..strokeCap = StrokeCap.round,
+      );
+      canvas.drawLine(
+        Offset(plateCenterX - plateW * 0.3, plateCenterY + 5),
+        Offset(plateCenterX + plateW * 0.14, plateCenterY + 5),
+        Paint()
+          ..color = const Color(0xFF0B0B0E).withOpacity(0.45)
+          ..strokeWidth = 1.6
+          ..strokeCap = StrokeCap.round,
+      );
+    }
+
+    // حافة لامعة على الغلاف المتحرك
     canvas.drawPath(
-      leftFace,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: isDark
-              ? [Colors.white.withOpacity(0.22), Colors.white.withOpacity(0.04)]
-              : [const Color(0xFFF6F7FA), const Color(0xFFCFD3DE)],
-        ).createShader(leftFace.getBounds()),
-    );
-
-    canvas.drawPath(
-      rightFace,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: isDark
-              ? [Colors.white.withOpacity(0.10), Colors.black.withOpacity(0.50)]
-              : [const Color(0xFFD4D7E2), const Color(0xFF9EA4B3)],
-        ).createShader(rightFace.getBounds()),
-    );
-
-    canvas.save();
-    canvas.translate(cx, cy * 0.98);
-    canvas.rotate(-0.14);
-    final innerCard = RRect.fromRectAndRadius(
-      Rect.fromCenter(center: Offset.zero, width: w * 0.34, height: h * 0.25),
-      Radius.circular(w * 0.045),
-    );
-    canvas.drawRRect(
-      innerCard,
-      Paint()
-        ..color = (isDark ? Colors.white : Colors.black).withOpacity(0.10),
-    );
-    canvas.drawRRect(
-      innerCard,
+      coverPath,
       Paint()
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.1
-        ..color = Colors.white.withOpacity(isDark ? 0.55 : 0.95),
-    );
-    final Color baseLineColor =
-        (isDark ? Colors.white : const Color(0xFF121216));
-    final linePaint = Paint()
-      ..strokeCap = StrokeCap.round
-      ..strokeWidth = 2.6
-      ..color = baseLineColor.withOpacity(0.75);
-    canvas.drawLine(
-      Offset(-w * 0.11, -h * 0.05),
-      Offset(w * 0.11, -h * 0.05),
-      linePaint,
-    );
-    canvas.drawLine(
-      Offset(-w * 0.11, 0),
-      Offset(w * 0.06, 0),
-      linePaint..color = baseLineColor.withOpacity(0.45),
-    );
-    canvas.drawLine(
-      Offset(-w * 0.11, h * 0.05),
-      Offset(w * 0.03, h * 0.05),
-      linePaint..color = baseLineColor.withOpacity(0.30),
-    );
-    canvas.restore();
-
-    final edgePaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.4
-      ..strokeJoin = StrokeJoin.round
-      ..shader = LinearGradient(
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-        colors: [
-          Colors.white.withOpacity(0.95),
-          Colors.white.withOpacity(0.25),
-          Colors.white.withOpacity(0.75),
-        ],
-      ).createShader(Rect.fromLTWH(0, 0, w, h));
-
-    canvas.drawPath(topFace, edgePaint);
-    canvas.drawPath(leftFace, edgePaint);
-    canvas.drawPath(rightFace, edgePaint);
-
-    final penPath = Path()
-      ..moveTo(w * 0.80, h * 0.17)
-      ..lineTo(w * 0.89, h * 0.25)
-      ..lineTo(w * 0.67, h * 0.52)
-      ..lineTo(w * 0.56, h * 0.56)
-      ..lineTo(w * 0.60, h * 0.44)
-      ..close();
-    canvas.drawPath(
-      penPath,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topRight,
-          end: Alignment.bottomLeft,
-          colors: isDark
-              ? [Colors.white.withOpacity(0.88), Colors.white.withOpacity(0.18)]
-              : [Colors.white, const Color(0xFF454752)],
-        ).createShader(penPath.getBounds()),
-    );
-    canvas.drawPath(
-      penPath,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.2
-        ..color = Colors.white.withOpacity(0.9),
-    );
-
-    if (enableShimmer) {
-      final sx = -w * 0.5 + (phase * w * 2.0);
-      final clip = Path()
-        ..addPath(topFace, Offset.zero)
-        ..addPath(leftFace, Offset.zero)
-        ..addPath(rightFace, Offset.zero);
-      canvas.save();
-      canvas.clipPath(clip);
-      final beamPaint = Paint()
+        ..strokeWidth = 1.35
         ..shader = LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [
-            Colors.transparent,
-            Colors.white.withOpacity(isDark ? 0.24 : 0.58),
-            Colors.transparent,
+            Colors.white.withOpacity(0.92),
+            Colors.white.withOpacity(0.28),
+            Colors.white.withOpacity(0.65),
           ],
-        ).createShader(Rect.fromLTWH(sx, 0, w * 0.34, h));
-      canvas.drawRect(Rect.fromLTWH(sx, 0, w * 0.34, h), beamPaint);
+        ).createShader(coverPath.getBounds()),
+    );
+
+    // 5. الزمبرك المعدني الحلزوني الثلاثي الأبعاد على محور الدفتر
+    const int coilCount = 7;
+    for (int i = 0; i < coilCount; i++) {
+      final double cy = bookTop + bookH * (0.11 + (i * 0.78 / (coilCount - 1)));
+      // ثقب في الورقة
+      canvas.drawCircle(
+        Offset(spineX + w * 0.022, cy),
+        w * 0.013,
+        Paint()..color = const Color(0xFF14151B),
+      );
+      // حلقة الزمبرك المعدنية
+      final coilRect = Rect.fromCenter(
+        center: Offset(spineX - w * 0.008, cy),
+        width: w * 0.072,
+        height: h * 0.036,
+      );
+      canvas.drawArc(
+        coilRect,
+        math.pi * 0.45,
+        math.pi * 1.35,
+        false,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = w * 0.015
+          ..strokeCap = StrokeCap.round
+          ..shader = const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.white, Color(0xFF8C919E), Color(0xFF1A1B20)],
+          ).createShader(coilRect),
+      );
+    }
+
+    // 6. القلم ثلاثي الأبعاد باللون الأسود والأبيض الأنيق
+    // موضع القلم: إما يكتب عند activeNibPoint أو يستقر فوق الدفتر المغلق
+    final Offset restTip = Offset(spineX + bookW * 0.25, bookTop + bookH * 0.76);
+    final Offset penTip = Offset.lerp(activeNibPoint, restTip, penRestFactor)!;
+    final double penAngle = ui.lerpDouble(-0.72, -0.64, penRestFactor)!;
+    final double penLen = w * 0.40;
+    final double penThick = w * 0.056;
+
+    // ظل القلم على الدفتر
+    canvas.save();
+    canvas.translate(penTip.dx + 4, penTip.dy + 6);
+    canvas.rotate(penAngle);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(0, -penThick * 0.45, penLen, penThick * 0.9),
+        Radius.circular(penThick),
+      ),
+      Paint()
+        ..color = Colors.black.withOpacity(0.45)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7),
+    );
+    canvas.restore();
+
+    canvas.save();
+    canvas.translate(penTip.dx, penTip.dy);
+    canvas.rotate(penAngle);
+
+    // رأس القلم الفضي المدبب
+    final nibPath = Path()
+      ..moveTo(0, 0)
+      ..lineTo(penLen * 0.16, -penThick * 0.46)
+      ..lineTo(penLen * 0.16, penThick * 0.46)
+      ..close();
+    canvas.drawPath(
+      nibPath,
+      Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.white, Color(0xFF9EA3B0)],
+        ).createShader(nibPath.getBounds()),
+    );
+    // سن حبر أسود دقيق
+    canvas.drawCircle(Offset(1.2, 0), w * 0.008, Paint()..color = Colors.black);
+
+    // جسم القلم السفلي (أبيض لؤلؤي بارز)
+    final lowerBarrel = Rect.fromLTWH(
+      penLen * 0.16,
+      -penThick * 0.48,
+      penLen * 0.24,
+      penThick * 0.96,
+    );
+    canvas.drawRect(
+      lowerBarrel,
+      Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.white, Color(0xFFD5D8E2), Color(0xFF9DA2B0)],
+        ).createShader(lowerBarrel),
+    );
+
+    // جسم القلم العلوي (أسود أوبسيدي فاخر)
+    final upperBarrel = RRect.fromRectAndCorners(
+      Rect.fromLTWH(
+        penLen * 0.40,
+        -penThick * 0.48,
+        penLen * 0.60,
+        penThick * 0.96,
+      ),
+      topRight: Radius.circular(penThick * 0.48),
+      bottomRight: Radius.circular(penThick * 0.48),
+    );
+    canvas.drawRRect(
+      upperBarrel,
+      Paint()
+        ..shader = const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFF3E404A), Color(0xFF0E0F13), Color(0xFF050507)],
+        ).createShader(upperBarrel.outerRect),
+    );
+
+    // حلقة فضية فاصلة + مشبك قلم أبيض لامع
+    canvas.drawRect(
+      Rect.fromLTWH(
+        penLen * 0.39,
+        -penThick * 0.50,
+        penLen * 0.04,
+        penThick,
+      ),
+      Paint()..color = Colors.white,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+          penLen * 0.55,
+          -penThick * 0.72,
+          penLen * 0.34,
+          penThick * 0.24,
+        ),
+        Radius.circular(penThick),
+      ),
+      Paint()..color = Colors.white.withOpacity(0.92),
+    );
+
+    // حافة لمعان طولية على القلم
+    canvas.drawLine(
+      Offset(penLen * 0.16, -penThick * 0.24),
+      Offset(penLen * 0.94, -penThick * 0.24),
+      Paint()
+        ..color = Colors.white.withOpacity(0.65)
+        ..strokeWidth = 1.1
+        ..strokeCap = StrokeCap.round,
+    );
+
+    canvas.restore();
+
+    // 7. وميض اللمعان الخفيف فوق الغلاف أثناء فترة الثبات والفتح
+    if (enableShimmer) {
+      final sx = -w * 0.4 + (t * w * 1.9);
+      canvas.save();
+      canvas.clipPath(coverPath);
+      canvas.drawRect(
+        Rect.fromLTWH(sx, 0, w * 0.28, h),
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Colors.transparent,
+              Colors.white.withOpacity(0.22),
+              Colors.transparent,
+            ],
+          ).createShader(Rect.fromLTWH(sx, 0, w * 0.28, h)),
+      );
       canvas.restore();
     }
   }
 
   @override
-  bool shouldRepaint(covariant _SculptedPrismPainter oldDelegate) =>
-      oldDelegate.phase != phase ||
+  bool shouldRepaint(covariant _SpiralNotebookPenPainter oldDelegate) =>
+      oldDelegate.t != t ||
       oldDelegate.isDark != isDark ||
       oldDelegate.enableShimmer != enableShimmer;
 }
