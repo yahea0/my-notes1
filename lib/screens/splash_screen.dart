@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../theme/onyx_theme.dart';
@@ -28,7 +29,7 @@ class _SplashScreenState extends State<SplashScreen>
     )..forward();
 
     if (!widget.manualPreview) {
-      _navTimer = Timer(const Duration(milliseconds: 4200), _goHome);
+      _navTimer = Timer(const Duration(milliseconds: 4500), _goHome);
     }
   }
 
@@ -75,8 +76,10 @@ class _SplashScreenState extends State<SplashScreen>
               child: FadeTransition(
                 opacity: _fadeController,
                 child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 14,
+                  ),
                   child: Column(
                     children: [
                       Row(
@@ -132,52 +135,64 @@ class _SplashScreenState extends State<SplashScreen>
                           ),
                         ],
                       ),
-                      const Spacer(),
-                      const OnyxNotebook3DLogo(size: 245),
-                      const SizedBox(height: 18),
+                      Expanded(
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            final stageSize = math
+                                .min(
+                                  constraints.maxWidth * 0.94,
+                                  constraints.maxHeight * 0.92,
+                                )
+                                .clamp(190.0, 360.0);
+                            return Center(
+                              child: OnyxNotebook3DLogo(size: stageSize),
+                            );
+                          },
+                        ),
+                      ),
                       Text(
                         'ملاحظاتي',
                         style: applyArabicFont(
                           'Cairo',
                           TextStyle(
-                            fontSize: 40,
+                            fontSize: 38,
                             fontWeight: FontWeight.w800,
                             color: pal.textPrimary,
                             letterSpacing: 0.8,
                           ),
                         ),
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 6),
                       Text(
                         'سجل أفكارك.. تنظم حياتك',
                         style: applyArabicFont(
                           'Cairo',
                           TextStyle(
-                            fontSize: 16,
+                            fontSize: 15.5,
                             color: pal.textSecondary,
                           ),
                         ),
                       ),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: 18),
                       Onyx3DGlassCard(
                         enableShimmer: true,
                         isHighlighted: true,
                         borderRadius: 20,
                         padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 14,
+                          horizontal: 14,
+                          vertical: 13,
                         ),
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceAround,
                           children: [
                             _featureMini(pal, Icons.code, 'تلوين الأكواد'),
+                            _featureMini(pal, Icons.link, 'روابط ذكية'),
                             _featureMini(pal, Icons.mic_none, 'تسجيل صوتي'),
-                            _featureMini(pal, Icons.brush_outlined, 'رسم حر'),
                             _featureMini(pal, Icons.lock_outline, 'خزينة سرية'),
                           ],
                         ),
                       ),
-                      const Spacer(),
+                      const SizedBox(height: 16),
                       SizedBox(
                         width: double.infinity,
                         child: Onyx3DButton(
@@ -188,7 +203,7 @@ class _SplashScreenState extends State<SplashScreen>
                           onPressed: _goHome,
                         ),
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 6),
                     ],
                   ),
                 ),
@@ -204,7 +219,7 @@ class _SplashScreenState extends State<SplashScreen>
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 20, color: pal.textPrimary),
+        Icon(icon, size: 19, color: pal.textPrimary),
         const SizedBox(height: 5),
         Text(
           label,
