@@ -5,8 +5,10 @@ import 'package:flutter/services.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import '../services/notification_service.dart';
 import '../theme/onyx_theme.dart';
 import '../utils/code_highlighter.dart';
+import '../utils/link_detector.dart';
 import '../widgets/luxury_3d_glass.dart';
 import 'add_note_screen.dart';
 import 'splash_screen.dart';
@@ -21,7 +23,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   String _selectedCategory = 'الكل';
-  int _currentIndex = 0; // 0: الرئيسية، 1: الأرشيف، 2: المفضلة، 3: الإعدادات، 4: سلة المهملات
+  int _currentIndex = 0;
   bool _isSearching = false;
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
@@ -73,79 +75,115 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final pal = OnyxPalette.of(OnyxSettings.isDark);
     final pinController = TextEditingController();
+    final pinFocus = FocusNode();
+    int attemptNonce = 0;
+    String? pinError;
+
     final bool? unlocked = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: pal.elevatedBg,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(24),
-          side: BorderSide(color: pal.glassStrongBorder),
-        ),
-        title: Row(
-          children: [
-            Icon(Icons.lock_outline, color: pal.textPrimary),
-            const SizedBox(width: 8),
-            Text('ملاحظة محمية', style: TextStyle(color: pal.textPrimary)),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'أدخل الرقم السري للوصول إلى هذه الملاحظة',
-              style: TextStyle(color: pal.textSecondary, fontSize: 13),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: pinController,
-              obscureText: true,
-              autofocus: true,
-              keyboardType: TextInputType.number,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: pal.textPrimary,
-                fontSize: 20,
-                letterSpacing: 6,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) => AlertDialog(
+          backgroundColor: pal.elevatedBg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+            side: BorderSide(color: pal.glassStrongBorder),
+          ),
+          title: Row(
+            children: [
+              Icon(Icons.lock_outline, color: pal.textPrimary),
+              const SizedBox(width: 8),
+              Text('ملاحظة محمية', style: TextStyle(color: pal.textPrimary)),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'أدخل الرقم السري للوصول إلى هذه الملاحظة',
+                style: TextStyle(color: pal.textSecondary, fontSize: 13),
               ),
-              decoration: InputDecoration(
-                hintText: '••••',
-                hintStyle: TextStyle(color: pal.textMuted),
-                filled: true,
-                fillColor: pal.inputFill,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide(color: pal.glassBorder),
+              const SizedBox(height: 12),
+              TextField(
+                key: ValueKey(attemptNonce),
+                controller: pinController,
+                focusNode: pinFocus,
+                obscureText: true,
+                autofocus: true,
+                autocorrect: false,
+                enableSuggestions: false,
+                keyboardType: TextInputType.number,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: pal.textPrimary,
+                  fontSize: 20,
+                  letterSpacing: 6,
+                ),
+                onChanged: (_) {
+                  if (pinError != null) setModalState(() => pinError = null);
+                },
+                decoration: InputDecoration(
+                  hintText: '••••',
+                  hintStyle: TextStyle(color: pal.textMuted),
+                  errorText: pinError,
+                  suffixIcon: IconButton(
+                    icon: Icon(Icons.close, size: 18, color: pal.textMuted),
+                    onPressed: () {
+                      pinController.clear();
+                      setModalState(() {
+                        pinError = null;
+                        attemptNonce++;
+                      });
+                      WidgetsBinding.instance.addPostFrameCallback(
+                        (_) => pinFocus.requestFocus(),
+                      );
+                    },
+                  ),
+                  filled: true,
+                  fillColor: pal.inputFill,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: BorderSide(color: pal.glassBorder),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text('إلغاء', style: TextStyle(color: pal.textMuted)),
+            ),
+            TextButton(
+              onPressed: () {
+                if (pinController.text.trim() == OnyxSettings.vaultPin) {
+                  Navigator.pop(ctx, true);
+                } else {
+                  pinController.clear();
+                  setModalState(() {
+                    pinError = 'الرقم السري غير صحيح!';
+                    attemptNonce++;
+                  });
+                  WidgetsBinding.instance.addPostFrameCallback(
+                    (_) => pinFocus.requestFocus(),
+                  );
+                }
+              },
+              child: Text(
+                'فتح',
+                style: TextStyle(
+                  color: pal.textPrimary,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: Text('إلغاء', style: TextStyle(color: pal.textMuted)),
-          ),
-          TextButton(
-            onPressed: () {
-              if (pinController.text.trim() == OnyxSettings.vaultPin) {
-                Navigator.pop(ctx, true);
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('الرقم السري غير صحيح!')),
-                );
-              }
-            },
-            child: Text(
-              'فتح',
-              style: TextStyle(
-                color: pal.textPrimary,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-        ],
       ),
     );
+
+    pinController.dispose();
+    pinFocus.dispose();
 
     if (unlocked == true && mounted) {
       await Navigator.push(
@@ -297,7 +335,8 @@ class _HomeScreenState extends State<HomeScreen> {
           borderRadius: BorderRadius.circular(22),
           side: BorderSide(color: pal.glassBorder),
         ),
-        title: Text('إفراغ سلة المهملات', style: TextStyle(color: pal.textPrimary)),
+        title:
+            Text('إفراغ سلة المهملات', style: TextStyle(color: pal.textPrimary)),
         content: Text(
           'سيتم حذف كل الملاحظات الموجودة في السلة نهائياً. هل أنت متأكد؟',
           style: TextStyle(color: pal.textSecondary),
@@ -310,7 +349,9 @@ class _HomeScreenState extends State<HomeScreen> {
           TextButton(
             onPressed: () {
               final box = Hive.box('notes');
-              final keysToDelete = box.toMap().entries
+              final keysToDelete = box
+                  .toMap()
+                  .entries
                   .where((e) => e.value is Map && e.value['isTrashed'] == true)
                   .map((e) => e.key)
                   .toList();
@@ -742,6 +783,9 @@ class _HomeScreenState extends State<HomeScreen> {
             ? getLanguageById(savedLang)
             : CodeDetector.detect(rawContent));
 
+    final List<DetectedLink> links =
+        maskLocked ? const [] : LinkDetector.extractLinks(rawContent);
+
     final TextStyle titleStyle = applyArabicFont(
       fontFam,
       TextStyle(
@@ -826,8 +870,13 @@ class _HomeScreenState extends State<HomeScreen> {
                               color: pal.danger,
                               size: 20,
                             ),
-                            onPressed: () =>
-                                _showDeleteConfirmation(box, note, noteKey, pal, forceDelete: true),
+                            onPressed: () => _showDeleteConfirmation(
+                              box,
+                              note,
+                              noteKey,
+                              pal,
+                              forceDelete: true,
+                            ),
                           ),
                         ]
                       : [
@@ -882,7 +931,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
             ],
           ),
-
           if (!maskLocked &&
               imagePaths.isNotEmpty &&
               File(imagePaths[0].toString()).existsSync())
@@ -899,9 +947,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-
           const SizedBox(height: 6),
-
           if (maskLocked)
             Container(
               width: double.infinity,
@@ -913,7 +959,11 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               child: Row(
                 children: [
-                  Icon(Icons.visibility_off_outlined, size: 15, color: pal.textMuted),
+                  Icon(
+                    Icons.visibility_off_outlined,
+                    size: 15,
+                    color: pal.textMuted,
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
@@ -940,9 +990,9 @@ class _HomeScreenState extends State<HomeScreen> {
               maxLines: compactGrid ? 2 : 3,
               overflow: TextOverflow.ellipsis,
             ),
-
           if (!maskLocked &&
-              (codeLang != null ||
+              (links.isNotEmpty ||
+                  codeLang != null ||
                   audioRecords.isNotEmpty ||
                   checklist.isNotEmpty))
             Padding(
@@ -951,6 +1001,43 @@ class _HomeScreenState extends State<HomeScreen> {
                 spacing: 6,
                 runSpacing: 4,
                 children: [
+                  ...links.take(2).map(
+                        (link) => GestureDetector(
+                          onTap: () => NotificationService.openExternalUrl(
+                            link.normalizedUrl,
+                          ),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 9,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: pal.accent.withOpacity(0.14),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: pal.glassStrongBorder),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  link.icon,
+                                  size: 13,
+                                  color: pal.textPrimary,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  link.platformName,
+                                  style: TextStyle(
+                                    color: pal.textPrimary,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
                   if (codeLang != null)
                     _miniMetaPill(pal, Icons.code, codeLang.displayName),
                   if (audioRecords.isNotEmpty)
@@ -968,7 +1055,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
             ),
-
           if (!maskLocked && tags.isNotEmpty && !compactGrid)
             Padding(
               padding: const EdgeInsets.only(top: 8),
@@ -995,7 +1081,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     .toList(),
               ),
             ),
-
           if (compactGrid) const Spacer() else const SizedBox(height: 10),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1114,25 +1199,33 @@ class _HomeScreenState extends State<HomeScreen> {
                 enableShimmer: true,
                 isHighlighted: true,
                 borderRadius: 24,
-                padding: const EdgeInsets.all(18),
-                child: Column(
-                  children: [
-                    const OnyxNotebook3DLogo(size: 98, interactiveTilt: false),
-                    const SizedBox(height: 10),
-                    Text(
-                      'ملاحظاتي',
-                      style: TextStyle(
-                        color: pal.textPrimary,
-                        fontSize: 19,
-                        fontWeight: FontWeight.w800,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      const OnyxNotebook3DLogo(
+                        size: 168,
+                        interactiveTilt: false,
                       ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '$activeCount ملاحظة محفوظة',
-                      style: TextStyle(color: pal.textMuted, fontSize: 12),
-                    ),
-                  ],
+                      const SizedBox(height: 6),
+                      Text(
+                        'ملاحظاتي',
+                        style: TextStyle(
+                          color: pal.textPrimary,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '$activeCount ملاحظة محفوظة',
+                        style: TextStyle(color: pal.textMuted, fontSize: 12),
+                      ),
+                    ],
+                  ),
                 ),
               ),
               const SizedBox(height: 14),
@@ -1222,7 +1315,9 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               SwitchListTile(
                 title: Text(
-                  isDark ? 'الوضع الداكن (أسود فاخر)' : 'الوضع المشرق (أبيض أنيق)',
+                  isDark
+                      ? 'الوضع الداكن (أسود فاخر)'
+                      : 'الوضع المشرق (أبيض أنيق)',
                   style: TextStyle(
                     color: pal.textPrimary,
                     fontWeight: FontWeight.w600,
@@ -1308,7 +1403,8 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Column(
             children: [
               ListTile(
-                leading: Icon(Icons.font_download_outlined, color: pal.textPrimary),
+                leading:
+                    Icon(Icons.font_download_outlined, color: pal.textPrimary),
                 title: Text(
                   'الخط الافتراضي للملاحظات الجديدة',
                   style: TextStyle(color: pal.textPrimary),
@@ -1542,7 +1638,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         TextButton(
                           onPressed: () => Navigator.pop(ctx),
                           child: Text(
-                            'إلغاء',
+                            'إلاء',
                             style: TextStyle(color: pal.textMuted),
                           ),
                         ),
@@ -1602,6 +1698,7 @@ class _HomeScreenState extends State<HomeScreen> {
         content: TextField(
           controller: controller,
           keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
           maxLength: 8,
           textAlign: TextAlign.center,
           style:
