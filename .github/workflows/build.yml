@@ -50,6 +50,15 @@ jobs:
       - name: Build Release APK
         run: flutter build apk --release
 
+      - name: Verify APK Launchable Activity
+        run: |
+          echo "=== Merged AndroidManifest.xml ==="
+          find build/app/intermediates/merged_manifests -name "AndroidManifest.xml" -exec cat {} +
+          echo "=== AAPT2 Badging ==="
+          AAPT2=$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -name aapt2 | sort -V | tail -n 1)
+          "$AAPT2" dump badging build/app/outputs/flutter-apk/app-release.apk | grep -E "package:|application-label:|launchable-activity:"
+          "$AAPT2" dump badging build/app/outputs/flutter-apk/app-release.apk | grep -q "launchable-activity:"
+
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
