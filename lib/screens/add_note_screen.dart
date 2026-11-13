@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:image_picker/image_picker.dart';
@@ -16,6 +17,7 @@ import 'package:record/record.dart';
 import 'package:share_plus/share_plus.dart';
 import '../services/notification_service.dart';
 import '../theme/onyx_theme.dart';
+import '../utils/code_highlighter.dart';
 import '../widgets/luxury_3d_glass.dart';
 import 'sketch_screen.dart';
 
@@ -31,7 +33,7 @@ class AddNoteScreen extends StatefulWidget {
 
 class _AddNoteScreenState extends State<AddNoteScreen> {
   late final TextEditingController _titleController;
-  late final TextEditingController _contentController;
+  late final CodeSyntaxTextController _contentController;
   final TextEditingController _tagController = TextEditingController();
   final TextEditingController _todoController = TextEditingController();
   final ScrollController _contentScrollController = ScrollController();
@@ -48,6 +50,20 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   List<Map<String, String>> _audioRecords = [];
   List<String> _tags = [];
   List<Map<String, dynamic>> _checklist = [];
+
+  // وضع الكود البرمجي وتلوينه التلقائي
+  String _codeMode = 'auto'; // auto | on | off
+  String _manualLangId = '';
+  CodeLanguageInfo? _detectedLang;
+
+  // التراجع والإعادة للنص
+  final List<String> _undoStack = [];
+  final List<String> _redoStack = [];
+  String _lastCommittedText = '';
+  bool _applyingHistory = false;
+
+  // بصمة الحالة الأولية لاكتشاف التعديلات غير المحفوظة عند الخروج
+  late String _initialSignature;
 
   String _calcDisplay = '0';
   final List<String> _calcHistory = [];
@@ -75,10 +91,12 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   void initState() {
     super.initState();
     final n = widget.note;
-    _titleController =
-        TextEditingController(text: n != null ? (n['title'] ?? '') : '');
-    _contentController =
-        TextEditingController(text: n != null ? (n['content'] ?? '') : '');
+    final initialTitle = n != null ? (n['title'] ?? '').toString() : '';
+    final initialContent = n != null ? (n['content'] ?? '').toString() : '';
+
+    _titleController = TextEditingController(text: initialTitle);
+    _contentController = CodeSyntaxTextController(text: initialContent);
+    _lastCommittedText = initialContent;
 
     final cat = n != null ? (n['category'] as String? ?? 'عام') : 'عام';
     _selectedCategory = _categories.contains(cat) ? cat : 'عام';
@@ -86,9 +104,11 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     if (n != null) {
       _customTitleColor = n['textColor'] as int?;
       _customContentColor = n['contentColor'] as int?;
-      _fontFamily = (n['fontFamily'] as String?) ?? 'Tahoma';
+      _fontFamily = (n['fontFamily'] as String?) ?? OnyxSettings.defaultFont;
       _titleFontSize = ((n['titleFontSize'] as num?) ?? 22.0).toDouble();
-      _contentFontSize = ((n['contentFontSize'] as num?) ?? 16.0).toDouble();
+      _contentFontSize = ((n['contentFontSize'] as num?) ??
+              OnyxSettings.defaultContentSize)
+          .toDouble();
       _imagePaths = List<String>.from(n['imagePaths'] ?? []);
       _audioRecords = List<Map<String, String>>.from(
         (n['audioRecords'] ?? []).map((x) => Map<String, String>.from(x)),
@@ -99,8 +119,16 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       );
       _isPinned = (n['isPinned'] as bool?) ?? false;
       _isLocked = (n['isLocked'] as bool?) ?? false;
+      _codeMode = (n['codeMode'] as String?) ?? 'auto';
+      _manualLangId = (n['codeLanguage'] as String?) ?? '';
       _showChecklistInput = _checklist.isNotEmpty;
+    } else {
+      _fontFamily = OnyxSettings.defaultFont;
+      _contentFontSize = OnyxSettings.defaultContentSize;
     }
+
+    _refreshCodeDetection();
+    _initialSignature = _computeSignature();
 
     _completeSub = _audioPlayer.onPlayerComplete.listen((_) {
       if (mounted) {
@@ -134,6 +162,161 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     super.dispose();
   }
 
+  bool get _isCodeActive {
+    if (_codeMode == 'off') return false;
+    if (_codeMode == 'on') return true;
+    return _detectedLang != null;
+  }
+
+  CodeLanguageInfo? get _activeLanguage {
+    if (_codeMode == 'off') return null;
+    if (_manualLangId.isNotEmpty) return getLanguageById(_manualLangId);
+    if (_detectedLang != null) return _detectedLang;
+    if (_codeMode == 'on') return getLanguageById('dart');
+    return null;
+  }
+
+  void _refreshCodeDetection() {
+    if (_codeMode == 'auto') {
+      _detectedLang = CodeDetector.detect(_contentController.text);
+    } else if (_codeMode == 'on') {
+      _detectedLang = CodeDetector.detect(_contentController.text) ??
+          getLanguageById(_manualLangId.isNotEmpty ? _manualLangId : 'dart');
+    } else {
+      _detectedLang = null;
+    }
+    _contentController.syntaxEnabled = _isCodeActive;
+    _contentController.isDarkTheme = OnyxSettings.isDark;
+    _contentController.languageId = _activeLanguage?.id ?? 'dart';
+  }
+
+  void _onContentChanged(String newVal) {
+    if (!_applyingHistory && newVal != _lastCommittedText) {
+      _undoStack.add(_lastCommittedText);
+      if (_undoStack.length > 40) _undoStack.removeAt(0);
+      _redoStack.clear();
+      _lastCommittedText = newVal;
+    }
+    _refreshCodeDetection();
+    setState(() {});
+  }
+
+  void _undo() {
+    if (_undoStack.isEmpty) return;
+    _applyingHistory = true;
+    _redoStack.add(_contentController.text);
+    final prev = _undoStack.removeLast();
+    _lastCommittedText = prev;
+    _contentController.value = TextEditingValue(
+      text: prev,
+      selection: TextSelection.collapsed(offset: prev.length),
+    );
+    _applyingHistory = false;
+    _refreshCodeDetection();
+    setState(() {});
+  }
+
+  void _redo() {
+    if (_redoStack.isEmpty) return;
+    _applyingHistory = true;
+    _undoStack.add(_contentController.text);
+    final next = _redoStack.removeLast();
+    _lastCommittedText = next;
+    _contentController.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: next.length),
+    );
+    _applyingHistory = false;
+    _refreshCodeDetection();
+    setState(() {});
+  }
+
+  String _computeSignature() {
+    return [
+      _titleController.text,
+      _contentController.text,
+      _selectedCategory,
+      _customTitleColor?.toString() ?? '',
+      _customContentColor?.toString() ?? '',
+      _fontFamily,
+      _titleFontSize.toStringAsFixed(1),
+      _contentFontSize.toStringAsFixed(1),
+      _isPinned.toString(),
+      _isLocked.toString(),
+      _codeMode,
+      _manualLangId,
+      _imagePaths.join('|'),
+      _audioRecords.map((e) => '${e['path']}:${e['name']}').join('|'),
+      _tags.join('|'),
+      _checklist.map((e) => '${e['text']}:${e['done']}').join('|'),
+    ].join('§');
+  }
+
+  bool get _hasUnsavedChanges => _computeSignature() != _initialSignature;
+
+  Future<void> _handleBackPressed() async {
+    if (!OnyxSettings.confirmOnExit || !_hasUnsavedChanges) {
+      if (mounted) Navigator.of(context).pop();
+      return;
+    }
+
+    final pal = OnyxPalette.of(OnyxSettings.isDark);
+    final String? action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: pal.elevatedBg,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(22),
+          side: BorderSide(color: pal.glassStrongBorder),
+        ),
+        title: Text(
+          'هل تريد حفظ الملاحظة؟',
+          style: TextStyle(
+            color: pal.textPrimary,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        content: Text(
+          'لديك تعديلات لم تُحفظ بعد. اختر حفظ وخروج أو إلغاء لتجاهلها.',
+          style: TextStyle(color: pal.textSecondary, fontSize: 13.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'discard'),
+            child: Text(
+              'إلغاء',
+              style: TextStyle(
+                color: pal.danger,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: pal.accent,
+              foregroundColor: pal.onAccent,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            onPressed: () => Navigator.pop(ctx, 'save'),
+            child: const Text(
+              'حفظ وخروج',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted || action == null) return;
+    if (action == 'discard') {
+      Navigator.of(context).pop();
+    } else if (action == 'save') {
+      _saveNote();
+    }
+  }
+
   Map<String, dynamic> _buildNoteMap({bool asCopy = false}) {
     final now = DateTime.now();
     final dateStr = DateFormat('yyyy/MM/dd').format(now);
@@ -154,8 +337,11 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       'isArchived': (!asCopy && widget.note != null)
           ? (widget.note!['isArchived'] ?? false)
           : false,
+      'isTrashed': false,
       'isPinned': asCopy ? false : _isPinned,
       'isLocked': asCopy ? false : _isLocked,
+      'codeMode': _codeMode,
+      'codeLanguage': _activeLanguage?.id ?? _manualLangId,
       'textColor': _customTitleColor,
       'contentColor': _customContentColor,
       'fontFamily': _fontFamily,
@@ -179,7 +365,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
         _checklist.isNotEmpty;
 
     if (!hasAnyData) {
-      Navigator.pop(context);
+      Navigator.of(context).pop();
       return;
     }
 
@@ -189,12 +375,12 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     } else {
       Hive.box('notes').put(widget.noteKey, noteData);
     }
-    Navigator.pop(context);
+    Navigator.of(context).pop();
   }
 
   void _duplicateNote() {
     Hive.box('notes').add(_buildNoteMap(asCopy: true));
-    Navigator.pop(context);
+    Navigator.of(context).pop();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('تم إنشاء نسخة من الملاحظة')),
     );
@@ -369,7 +555,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                 child: Container(
                   padding: const EdgeInsets.all(18),
                   decoration: BoxDecoration(
-                    color: pal.elevatedBg.withOpacity(0.92),
+                    color: pal.elevatedBg.withOpacity(0.94),
                     border:
                         Border(top: BorderSide(color: pal.glassStrongBorder)),
                   ),
@@ -683,17 +869,24 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   void _insertTextAtCursor(String snippet) {
     final text = _contentController.text;
     final selection = _contentController.selection;
+    final String newText;
+    final int newOffset;
     if (selection.start == -1) {
-      _contentController.text = text + snippet;
+      newText = text + snippet;
+      newOffset = newText.length;
     } else {
-      final newText =
-          text.replaceRange(selection.start, selection.end, snippet);
-      _contentController.value = TextEditingValue(
-        text: newText,
-        selection:
-            TextSelection.collapsed(offset: selection.start + snippet.length),
-      );
+      newText = text.replaceRange(selection.start, selection.end, snippet);
+      newOffset = selection.start + snippet.length;
     }
+    _undoStack.add(_lastCommittedText);
+    _lastCommittedText = newText;
+    _applyingHistory = true;
+    _contentController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: newOffset),
+    );
+    _applyingHistory = false;
+    _refreshCodeDetection();
     setState(() {});
   }
 
@@ -762,10 +955,10 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          'الحاسبة الذكية 3D',
+                          'الحاسبة',
                           style: TextStyle(
                             color: pal.textSecondary,
-                            fontSize: 14,
+                            fontSize: 15,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
@@ -865,12 +1058,21 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                           'C', '⌫', '%', '÷', '×', '−', '+', '(', ')', '^', '√'
                         ].contains(e);
 
+                        // تباين عالٍ ومضمون في الوضعين الداكن والمشرق
+                        final Color btnBg = isEq
+                            ? pal.accent
+                            : isOp
+                                ? (pal.isDark
+                                    ? const Color(0xFF282A33)
+                                    : const Color(0xFFDCE0EA))
+                                : (pal.isDark
+                                    ? const Color(0xFF17181E)
+                                    : const Color(0xFFF4F5F8));
+                        final Color btnText =
+                            isEq ? pal.onAccent : pal.textPrimary;
+
                         return Material(
-                          color: isEq
-                              ? pal.accent
-                              : (isOp
-                                  ? pal.chipBg.withOpacity(0.9)
-                                  : pal.inputFill),
+                          color: btnBg,
                           borderRadius: BorderRadius.circular(14),
                           clipBehavior: Clip.antiAlias,
                           child: InkWell(
@@ -911,7 +1113,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                                   fontWeight: isEq || isOp
                                       ? FontWeight.bold
                                       : FontWeight.w500,
-                                  color: isEq ? pal.onAccent : pal.textPrimary,
+                                  color: btnText,
                                 ),
                               ),
                             ),
@@ -957,7 +1159,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
             child: Container(
               padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
               decoration: BoxDecoration(
-                color: pal.elevatedBg.withOpacity(0.92),
+                color: pal.elevatedBg.withOpacity(0.94),
                 border: Border(top: BorderSide(color: pal.glassStrongBorder)),
               ),
               child: Column(
@@ -989,6 +1191,25 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                     onTap: () {
                       Navigator.pop(ctx);
                       _searchInNote();
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(
+                      _isCodeActive ? Icons.notes : Icons.code,
+                      color: pal.textPrimary,
+                    ),
+                    title: Text(
+                      _isCodeActive
+                          ? 'إيقاف وضع المحرر البرمجي'
+                          : 'تفعيل وضع المحرر البرمجي (ترقيم وتلوين)',
+                      style: TextStyle(color: pal.textPrimary),
+                    ),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      setState(() {
+                        _codeMode = _isCodeActive ? 'off' : 'on';
+                        _refreshCodeDetection();
+                      });
                     },
                   ),
                   ListTile(
@@ -1062,6 +1283,81 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     );
   }
 
+  void _showLanguagePicker(OnyxPalette pal) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+          child: Container(
+            height: 400,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: pal.elevatedBg.withOpacity(0.95),
+              border: Border(top: BorderSide(color: pal.glassStrongBorder)),
+            ),
+            child: Column(
+              children: [
+                Text(
+                  'اختر لغة البرمجة',
+                  style: TextStyle(
+                    color: pal.textPrimary,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Expanded(
+                  child: ListView(
+                    children: [
+                      ListTile(
+                        leading: Icon(Icons.auto_fix_high, color: pal.textPrimary),
+                        title: Text(
+                          'تعرّف تلقائي على اللغة',
+                          style: TextStyle(color: pal.textPrimary),
+                        ),
+                        onTap: () {
+                          setState(() {
+                            _codeMode = 'auto';
+                            _manualLangId = '';
+                            _refreshCodeDetection();
+                          });
+                          Navigator.pop(ctx);
+                        },
+                      ),
+                      ...kSupportedCodeLanguages.map(
+                        (lang) => ListTile(
+                          leading: Icon(Icons.code, color: pal.textSecondary),
+                          title: Text(
+                            lang.displayName,
+                            style: TextStyle(color: pal.textPrimary),
+                          ),
+                          trailing: _activeLanguage?.id == lang.id
+                              ? Icon(Icons.check, color: pal.accent)
+                              : null,
+                          onTap: () {
+                            setState(() {
+                              _codeMode = 'on';
+                              _manualLangId = lang.id;
+                              _refreshCodeDetection();
+                            });
+                            Navigator.pop(ctx);
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   String _formatSeconds(int sec) {
     final m = (sec ~/ 60).toString().padLeft(2, '0');
     final s = (sec % 60).toString().padLeft(2, '0');
@@ -1074,640 +1370,1037 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     return clean.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final pal = OnyxPalette.of(OnyxSettings.isDark);
-    final Color titleColor = resolveAdaptiveNoteColor(_customTitleColor, pal);
-    final Color contentColor =
-        resolveAdaptiveNoteColor(_customContentColor, pal, isContent: true);
+  Widget _buildCodeEditorArea(OnyxPalette pal) {
+    final lines = _contentController.text.split('\n');
+    final int lineCount = math.max(1, lines.length);
+    final double codeFontSize = _contentFontSize.clamp(12.0, 20.0);
 
-    final TextStyle titleStyle = applyArabicFont(
-      _fontFamily,
-      TextStyle(
-        fontSize: _titleFontSize,
-        fontWeight: FontWeight.bold,
-        color: titleColor,
-      ),
+    int maxCols = 32;
+    for (final line in lines) {
+      if (line.length > maxCols) maxCols = line.length;
+    }
+
+    final TextStyle codeStyle = TextStyle(
+      fontFamily: 'monospace',
+      fontSize: codeFontSize,
+      height: 1.55,
+      color: pal.textPrimary,
     );
-    final TextStyle contentStyle = applyArabicFont(
-      _fontFamily,
-      TextStyle(
-        fontSize: _contentFontSize,
-        color: contentColor,
-        height: 1.65,
-      ),
+    final StrutStyle codeStrut = StrutStyle(
+      fontFamily: 'monospace',
+      fontSize: codeFontSize,
+      height: 1.55,
+      forceStrutHeight: true,
     );
 
-    final int words = _wordCount(_contentController.text);
-    final int doneCount = _checklist.where((c) => c['done'] == true).length;
+    return Onyx3DGlassCard(
+      padding: EdgeInsets.zero,
+      borderRadius: 20,
+      isHighlighted: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // شريط أدوات المبرمجين السريع
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: pal.isDark
+                  ? Colors.white.withOpacity(0.05)
+                  : Colors.black.withOpacity(0.04),
+              border: Border(bottom: BorderSide(color: pal.divider)),
+            ),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: ['Tab', '{ }', '( )', '[ ]', '=>', ';', '</>', '" "']
+                    .map(
+                      (sym) => GestureDetector(
+                        onTap: () {
+                          final val = sym == 'Tab'
+                              ? '  '
+                              : sym.replaceAll(' ', '');
+                          _insertTextAtCursor(val);
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.only(left: 6),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: pal.chipBg,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: pal.glassBorder),
+                          ),
+                          child: Text(
+                            sym,
+                            style: TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: pal.textPrimary,
+                            ),
+                          ),
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+          ),
 
-    return Scaffold(
-      backgroundColor: pal.scaffoldBg,
-      resizeToAvoidBottomInset: true,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        iconTheme: IconThemeData(color: pal.textPrimary),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: Text(
-          widget.note == null ? 'ملاحظة جديدة' : 'تعديل الملاحظة',
-          style: TextStyle(color: pal.textPrimary, fontWeight: FontWeight.bold),
-        ),
-        actions: [
-          IconButton(
-            tooltip: _isLocked ? 'مقفلة' : 'قفل الملاحظة',
-            icon: Icon(
-              _isLocked ? Icons.lock : Icons.lock_open_outlined,
-              color: _isLocked ? pal.textPrimary : pal.textMuted,
+          // محرر الأكواد مع ترقيم الأسطر المتزامن والاتجاه LTR
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final double gutterWidth =
+                    lineCount >= 100 ? 48.0 : (lineCount >= 10 ? 40.0 : 34.0);
+                final double editorWidth = math.max(
+                  constraints.maxWidth - gutterWidth - 8,
+                  maxCols * (codeFontSize * 0.64) + 60,
+                );
+
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: gutterWidth,
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 12,
+                        horizontal: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: pal.isDark
+                            ? Colors.black.withOpacity(0.32)
+                            : Colors.black.withOpacity(0.04),
+                        border: Border(right: BorderSide(color: pal.divider)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: List.generate(
+                          lineCount,
+                          (idx) => Text(
+                            '${idx + 1}',
+                            strutStyle: codeStrut,
+                            style: TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: codeFontSize,
+                              height: 1.55,
+                              color: pal.textMuted,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: SizedBox(
+                          width: editorWidth,
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(minHeight: 240),
+                            child: TextField(
+                              controller: _contentController,
+                              scrollController: _contentScrollController,
+                              maxLines: null,
+                              style: codeStyle,
+                              strutStyle: codeStrut,
+                              onChanged: _onContentChanged,
+                              decoration: InputDecoration(
+                                contentPadding: const EdgeInsets.all(12),
+                                hintText: '// اكتب أو الصق الكود البرمجي هنا...',
+                                hintStyle: TextStyle(
+                                  color: pal.textMuted,
+                                  fontFamily: 'monospace',
+                                ),
+                                border: InputBorder.none,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
-            onPressed: () => setState(() => _isLocked = !_isLocked),
-          ),
-          IconButton(
-            tooltip: 'تثبيت',
-            icon: Icon(
-              _isPinned ? Icons.push_pin : Icons.push_pin_outlined,
-              color: _isPinned ? Colors.amber : pal.textPrimary,
-            ),
-            onPressed: () => setState(() => _isPinned = !_isPinned),
-          ),
-          IconButton(
-            tooltip: 'حفظ',
-            icon: Icon(Icons.check, color: pal.textPrimary),
-            onPressed: _saveNote,
           ),
         ],
       ),
-      body: OnyxBackdrop(
-        palette: pal,
-        child: Column(
-          children: [
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (_isRecording)
-                      Onyx3DGlassCard(
-                        margin: const EdgeInsets.only(bottom: 14),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
-                        borderRadius: 18,
-                        isHighlighted: true,
-                        enableShimmer: true,
-                        child: Row(
-                          children: [
-                            const Icon(Icons.mic, color: Colors.red, size: 26),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'جاري التسجيل... ${_formatSeconds(_recordSeconds)}',
-                                    style: const TextStyle(
-                                      color: Colors.redAccent,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 15,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  _RecordingWaveBars(seed: _recordSeconds),
-                                ],
-                              ),
-                            ),
-                            ElevatedButton.icon(
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.red,
-                                foregroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                              onPressed: _toggleRecording,
-                              icon: const Icon(Icons.stop, size: 18),
-                              label: const Text('إيقاف'),
-                            ),
-                          ],
-                        ),
-                      ),
-                    Onyx3DGlassCard(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-                      borderRadius: 24,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder(
+      valueListenable: Hive.box('settings').listenable(),
+      builder: (context, _, __) {
+        final pal = OnyxPalette.of(OnyxSettings.isDark);
+        _contentController.isDarkTheme = pal.isDark;
+
+        final Color titleColor =
+            resolveAdaptiveNoteColor(_customTitleColor, pal);
+        final Color contentColor =
+            resolveAdaptiveNoteColor(_customContentColor, pal, isContent: true);
+
+        final TextStyle titleStyle = applyArabicFont(
+          _fontFamily,
+          TextStyle(
+            fontSize: _titleFontSize,
+            fontWeight: FontWeight.bold,
+            color: titleColor,
+          ),
+        );
+        final TextStyle contentStyle = applyArabicFont(
+          _fontFamily,
+          TextStyle(
+            fontSize: _contentFontSize,
+            color: contentColor,
+            height: 1.65,
+          ),
+        );
+
+        final int words = _wordCount(_contentController.text);
+        final int linesCount =
+            _contentController.text.isEmpty ? 0 : _contentController.text.split('\n').length;
+        final int doneCount =
+            _checklist.where((c) => c['done'] == true).length;
+        final CodeLanguageInfo? activeLang = _activeLanguage;
+
+        return PopScope(
+          canPop: false,
+          onPopInvoked: (bool didPop) async {
+            if (didPop) return;
+            await _handleBackPressed();
+          },
+          child: Scaffold(
+            backgroundColor: pal.scaffoldBg,
+            resizeToAvoidBottomInset: true,
+            appBar: AppBar(
+              backgroundColor: Colors.transparent,
+              centerTitle: false,
+              titleSpacing: 0,
+              iconTheme: IconThemeData(color: pal.textPrimary),
+              leading: IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: _handleBackPressed,
+              ),
+              title: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: AlignmentDirectional.centerStart,
+                child: Text(
+                  widget.note == null ? 'ملاحظة جديدة' : 'تعديل الملاحظة',
+                  style: TextStyle(
+                    color: pal.textPrimary,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 19,
+                  ),
+                ),
+              ),
+              actions: [
+                IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'تراجع',
+                  icon: Icon(
+                    Icons.undo,
+                    size: 20,
+                    color: _undoStack.isEmpty ? pal.textMuted : pal.textPrimary,
+                  ),
+                  onPressed: _undoStack.isEmpty ? null : _undo,
+                ),
+                IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'إعادة',
+                  icon: Icon(
+                    Icons.redo,
+                    size: 20,
+                    color: _redoStack.isEmpty ? pal.textMuted : pal.textPrimary,
+                  ),
+                  onPressed: _redoStack.isEmpty ? null : _redo,
+                ),
+                IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                  padding: EdgeInsets.zero,
+                  tooltip: _isLocked ? 'مقفلة' : 'قفل الملاحظة',
+                  icon: Icon(
+                    _isLocked ? Icons.lock : Icons.lock_open_outlined,
+                    size: 20,
+                    color: _isLocked ? pal.textPrimary : pal.textMuted,
+                  ),
+                  onPressed: () => setState(() => _isLocked = !_isLocked),
+                ),
+                IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'تثبيت',
+                  icon: Icon(
+                    _isPinned ? Icons.push_pin : Icons.push_pin_outlined,
+                    size: 20,
+                    color: _isPinned ? Colors.amber : pal.textPrimary,
+                  ),
+                  onPressed: () => setState(() => _isPinned = !_isPinned),
+                ),
+                IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 40, minHeight: 40),
+                  tooltip: 'حفظ',
+                  icon: Icon(Icons.check, color: pal.textPrimary),
+                  onPressed: _saveNote,
+                ),
+              ],
+            ),
+            body: OnyxBackdrop(
+              palette: pal,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(16),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          TextField(
-                            controller: _titleController,
-                            style: titleStyle,
-                            decoration: InputDecoration(
-                              hintText: 'عنوان الملاحظة...',
-                              hintStyle: TextStyle(color: pal.textMuted),
-                              border: InputBorder.none,
+                          // شريط اللغة البرمجية المكتشفة في أعلى الملاحظة
+                          if (activeLang != null)
+                            Onyx3DGlassCard(
+                              margin: const EdgeInsets.only(bottom: 12),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 9,
+                              ),
+                              borderRadius: 16,
+                              isHighlighted: true,
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    Icons.code,
+                                    color: pal.textPrimary,
+                                    size: 19,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: GestureDetector(
+                                      onTap: () => _showLanguagePicker(pal),
+                                      child: Row(
+                                        children: [
+                                          Text(
+                                            activeLang.displayName,
+                                            style: TextStyle(
+                                              color: pal.textPrimary,
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 13.5,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Icon(
+                                            Icons.arrow_drop_down,
+                                            color: pal.textSecondary,
+                                            size: 18,
+                                          ),
+                                          const SizedBox(width: 6),
+                                          Text(
+                                            '· $linesCount سطر',
+                                            style: TextStyle(
+                                              color: pal.textMuted,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    visualDensity: VisualDensity.compact,
+                                    tooltip: 'نسخ الكود',
+                                    icon: Icon(
+                                      Icons.copy_all,
+                                      size: 18,
+                                      color: pal.textPrimary,
+                                    ),
+                                    onPressed: () {
+                                      Clipboard.setData(
+                                        ClipboardData(
+                                          text: _contentController.text,
+                                        ),
+                                      );
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        const SnackBar(
+                                          content: Text('تم نسخ الكود بنجاح'),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                  IconButton(
+                                    visualDensity: VisualDensity.compact,
+                                    tooltip: 'إيقاف عرض الكود',
+                                    icon: Icon(
+                                      Icons.close,
+                                      size: 18,
+                                      color: pal.textMuted,
+                                    ),
+                                    onPressed: () {
+                                      setState(() {
+                                        _codeMode = 'off';
+                                        _refreshCodeDetection();
+                                      });
+                                    },
+                                  ),
+                                ],
+                              ),
                             ),
-                          ),
-                          Divider(color: pal.divider),
-                          Wrap(
-                            spacing: 6,
-                            runSpacing: 6,
-                            crossAxisAlignment: WrapCrossAlignment.center,
-                            children: [
-                              ..._tags.map(
-                                (tag) => Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 4,
+
+                          if (_isRecording)
+                            Onyx3DGlassCard(
+                              margin: const EdgeInsets.only(bottom: 14),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 12,
+                              ),
+                              borderRadius: 18,
+                              isHighlighted: true,
+                              enableShimmer: true,
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.mic,
+                                    color: Colors.red,
+                                    size: 26,
                                   ),
-                                  decoration: BoxDecoration(
-                                    color: pal.chipBg,
-                                    borderRadius: BorderRadius.circular(99),
-                                    border: Border.all(color: pal.glassBorder),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'جاري التسجيل... ${_formatSeconds(_recordSeconds)}',
+                                          style: const TextStyle(
+                                            color: Colors.redAccent,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 15,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 6),
+                                        _RecordingWaveBars(
+                                          seed: _recordSeconds,
+                                        ),
+                                      ],
+                                    ),
                                   ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        '#$tag',
-                                        style: TextStyle(
-                                          color: pal.textSecondary,
-                                          fontSize: 12,
+                                  ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.red,
+                                      foregroundColor: Colors.white,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                    ),
+                                    onPressed: _toggleRecording,
+                                    icon: const Icon(Icons.stop, size: 18),
+                                    label: const Text('إيقاف'),
+                                  ),
+                                ],
+                              ),
+                            ),
+
+                          Onyx3DGlassCard(
+                            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                            borderRadius: 24,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                TextField(
+                                  controller: _titleController,
+                                  style: titleStyle,
+                                  onChanged: (_) => setState(() {}),
+                                  decoration: InputDecoration(
+                                    hintText: 'عنوان الملاحظة...',
+                                    hintStyle: TextStyle(color: pal.textMuted),
+                                    border: InputBorder.none,
+                                  ),
+                                ),
+                                Divider(color: pal.divider),
+                                Wrap(
+                                  spacing: 6,
+                                  runSpacing: 6,
+                                  crossAxisAlignment: WrapCrossAlignment.center,
+                                  children: [
+                                    ..._tags.map(
+                                      (tag) => Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 4,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: pal.chipBg,
+                                          borderRadius:
+                                              BorderRadius.circular(99),
+                                          border: Border.all(
+                                            color: pal.glassBorder,
+                                          ),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Text(
+                                              '#$tag',
+                                              style: TextStyle(
+                                                color: pal.textSecondary,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 4),
+                                            GestureDetector(
+                                              onTap: () => setState(
+                                                () => _tags.remove(tag),
+                                              ),
+                                              child: Icon(
+                                                Icons.close,
+                                                size: 13,
+                                                color: pal.textMuted,
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       ),
-                                      const SizedBox(width: 4),
-                                      GestureDetector(
-                                        onTap: () =>
-                                            setState(() => _tags.remove(tag)),
-                                        child: Icon(
-                                          Icons.close,
-                                          size: 13,
-                                          color: pal.textMuted,
+                                    ),
+                                    SizedBox(
+                                      width: 135,
+                                      child: TextField(
+                                        controller: _tagController,
+                                        style: TextStyle(
+                                          color: pal.textPrimary,
+                                          fontSize: 12.5,
                                         ),
+                                        decoration: InputDecoration(
+                                          isDense: true,
+                                          hintText: '+ أضف وسماً...',
+                                          hintStyle: TextStyle(
+                                            color: pal.textMuted,
+                                            fontSize: 12,
+                                          ),
+                                          border: InputBorder.none,
+                                        ),
+                                        onSubmitted: (val) {
+                                          final clean =
+                                              val.trim().replaceAll('#', '');
+                                          if (clean.isNotEmpty &&
+                                              !_tags.contains(clean)) {
+                                            setState(() => _tags.add(clean));
+                                          }
+                                          _tagController.clear();
+                                        },
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+
+                          if (_imagePaths.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: SizedBox(
+                                height: 108,
+                                child: ListView.builder(
+                                  scrollDirection: Axis.horizontal,
+                                  itemCount: _imagePaths.length,
+                                  itemBuilder: (context, index) {
+                                    final imgFile = File(_imagePaths[index]);
+                                    return Stack(
+                                      children: [
+                                        GestureDetector(
+                                          onTap: () => _viewGallery(index),
+                                          child: Container(
+                                            margin:
+                                                const EdgeInsets.only(left: 10),
+                                            width: 108,
+                                            decoration: BoxDecoration(
+                                              borderRadius:
+                                                  BorderRadius.circular(16),
+                                              border: Border.all(
+                                                color: pal.glassBorder,
+                                              ),
+                                              color: pal.chipBg,
+                                            ),
+                                            child: ClipRRect(
+                                              borderRadius:
+                                                  BorderRadius.circular(15),
+                                              child: imgFile.existsSync()
+                                                  ? Image.file(
+                                                      imgFile,
+                                                      fit: BoxFit.cover,
+                                                    )
+                                                  : Icon(
+                                                      Icons
+                                                          .broken_image_outlined,
+                                                      color: pal.textMuted,
+                                                    ),
+                                            ),
+                                          ),
+                                        ),
+                                        Positioned(
+                                          top: 4,
+                                          right: 4,
+                                          child: GestureDetector(
+                                            onTap: () => setState(
+                                              () =>
+                                                  _imagePaths.removeAt(index),
+                                            ),
+                                            child: Container(
+                                              padding: const EdgeInsets.all(3),
+                                              decoration: const BoxDecoration(
+                                                color: Colors.black87,
+                                                shape: BoxShape.circle,
+                                              ),
+                                              child: const Icon(
+                                                Icons.close,
+                                                color: Colors.white,
+                                                size: 15,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    );
+                                  },
+                                ),
+                              ),
+                            ),
+
+                          if (_audioRecords.isNotEmpty)
+                            ...List.generate(_audioRecords.length, (index) {
+                              final record = _audioRecords[index];
+                              final path = record['path'] ?? '';
+                              final bool isPlayingThis =
+                                  _currentlyPlayingPath == path;
+
+                              return Onyx3DGlassCard(
+                                margin: const EdgeInsets.only(bottom: 10),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 6,
+                                ),
+                                borderRadius: 16,
+                                child: Column(
+                                  children: [
+                                    Row(
+                                      children: [
+                                        IconButton(
+                                          icon: Icon(
+                                            isPlayingThis
+                                                ? Icons.pause_circle_filled
+                                                : Icons.play_circle_fill,
+                                            color: isPlayingThis
+                                                ? pal.danger
+                                                : pal.textPrimary,
+                                            size: 32,
+                                          ),
+                                          onPressed: () =>
+                                              _togglePlayAudio(path),
+                                        ),
+                                        Expanded(
+                                          child: Text(
+                                            record['name'] ?? 'تسجيل صوتي',
+                                            style: TextStyle(
+                                              color: pal.textPrimary,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                        IconButton(
+                                          icon: Icon(
+                                            Icons.edit,
+                                            color: pal.textMuted,
+                                            size: 19,
+                                          ),
+                                          onPressed: () => _renameAudio(index),
+                                        ),
+                                        IconButton(
+                                          icon: Icon(
+                                            Icons.close,
+                                            color: pal.danger,
+                                            size: 19,
+                                          ),
+                                          onPressed: () {
+                                            if (isPlayingThis) {
+                                              _audioPlayer.stop();
+                                            }
+                                            setState(() {
+                                              if (isPlayingThis) {
+                                                _currentlyPlayingPath = null;
+                                              }
+                                              _audioRecords.removeAt(index);
+                                            });
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                    if (isPlayingThis &&
+                                        _playDuration.inMilliseconds > 0)
+                                      Slider(
+                                        value: _playPosition.inMilliseconds
+                                            .clamp(
+                                              0,
+                                              _playDuration.inMilliseconds,
+                                            )
+                                            .toDouble(),
+                                        max: _playDuration.inMilliseconds
+                                            .toDouble(),
+                                        activeColor: pal.accent,
+                                        onChanged: (v) => _audioPlayer.seek(
+                                          Duration(milliseconds: v.toInt()),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              );
+                            }),
+
+                          if (_showChecklistInput || _checklist.isNotEmpty)
+                            Onyx3DGlassCard(
+                              margin: const EdgeInsets.only(bottom: 12),
+                              padding: const EdgeInsets.all(14),
+                              borderRadius: 18,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(
+                                        'قائمة المهام ($doneCount/${_checklist.length})',
+                                        style: TextStyle(
+                                          color: pal.textPrimary,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 13.5,
+                                        ),
+                                      ),
+                                      if (_checklist.isNotEmpty)
+                                        Text(
+                                          '${((doneCount / _checklist.length) * 100).round()}%',
+                                          style: TextStyle(
+                                            color: pal.textSecondary,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                  if (_checklist.isNotEmpty) ...[
+                                    const SizedBox(height: 6),
+                                    LinearProgressIndicator(
+                                      value: doneCount / _checklist.length,
+                                      backgroundColor: pal.chipBg,
+                                      color: pal.accent,
+                                      minHeight: 4,
+                                    ),
+                                  ],
+                                  const SizedBox(height: 8),
+                                  ...List.generate(_checklist.length, (i) {
+                                    final item = _checklist[i];
+                                    final bool done = item['done'] == true;
+                                    return Row(
+                                      children: [
+                                        Checkbox(
+                                          value: done,
+                                          activeColor: pal.accent,
+                                          checkColor: pal.onAccent,
+                                          onChanged: (v) => setState(
+                                            () => _checklist[i]['done'] =
+                                                v ?? false,
+                                          ),
+                                        ),
+                                        Expanded(
+                                          child: Text(
+                                            item['text']?.toString() ?? '',
+                                            style: TextStyle(
+                                              color: done
+                                                  ? pal.textMuted
+                                                  : pal.textPrimary,
+                                              decoration: done
+                                                  ? TextDecoration.lineThrough
+                                                  : null,
+                                            ),
+                                          ),
+                                        ),
+                                        IconButton(
+                                          icon: Icon(
+                                            Icons.close,
+                                            size: 16,
+                                            color: pal.textMuted,
+                                          ),
+                                          onPressed: () => setState(
+                                            () => _checklist.removeAt(i),
+                                          ),
+                                        ),
+                                      ],
+                                    );
+                                  }),
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: TextField(
+                                          controller: _todoController,
+                                          style: TextStyle(
+                                            color: pal.textPrimary,
+                                            fontSize: 13.5,
+                                          ),
+                                          decoration: InputDecoration(
+                                            isDense: true,
+                                            hintText: '+ أضف مهمة جديدة...',
+                                            hintStyle:
+                                                TextStyle(color: pal.textMuted),
+                                            border: InputBorder.none,
+                                          ),
+                                          onSubmitted: (val) {
+                                            if (val.trim().isEmpty) return;
+                                            setState(() {
+                                              _checklist.add({
+                                                'text': val.trim(),
+                                                'done': false,
+                                              });
+                                            });
+                                            _todoController.clear();
+                                          },
+                                        ),
+                                      ),
+                                      IconButton(
+                                        icon: Icon(
+                                          Icons.add_circle_outline,
+                                          color: pal.textPrimary,
+                                          size: 20,
+                                        ),
+                                        onPressed: () {
+                                          final val =
+                                              _todoController.text.trim();
+                                          if (val.isEmpty) return;
+                                          setState(() {
+                                            _checklist.add({
+                                              'text': val,
+                                              'done': false,
+                                            });
+                                          });
+                                          _todoController.clear();
+                                        },
                                       ),
                                     ],
                                   ),
-                                ),
+                                ],
                               ),
-                              SizedBox(
-                                width: 135,
+                            ),
+
+                          // المحرر الرئيسي: برمجي متلون مع ترقيم الأسطر أو نصي عادي
+                          if (_isCodeActive)
+                            _buildCodeEditorArea(pal)
+                          else
+                            Onyx3DGlassCard(
+                              padding: const EdgeInsets.all(16),
+                              borderRadius: 24,
+                              child: ConstrainedBox(
+                                constraints:
+                                    const BoxConstraints(minHeight: 220),
                                 child: TextField(
-                                  controller: _tagController,
-                                  style: TextStyle(
-                                    color: pal.textPrimary,
-                                    fontSize: 12.5,
-                                  ),
+                                  controller: _contentController,
+                                  scrollController: _contentScrollController,
+                                  maxLines: null,
+                                  style: contentStyle,
+                                  onChanged: _onContentChanged,
                                   decoration: InputDecoration(
-                                    isDense: true,
-                                    hintText: '+ أضف وسماً...',
-                                    hintStyle: TextStyle(
-                                      color: pal.textMuted,
-                                      fontSize: 12,
-                                    ),
+                                    hintText:
+                                        'اكتب ملاحظتك هنا أو الصق أي كود برمجي للتعرف عليه تلقائياً...',
+                                    hintStyle: TextStyle(color: pal.textMuted),
                                     border: InputBorder.none,
                                   ),
-                                  onSubmitted: (val) {
-                                    final clean =
-                                        val.trim().replaceAll('#', '');
-                                    if (clean.isNotEmpty &&
-                                        !_tags.contains(clean)) {
-                                      setState(() => _tags.add(clean));
-                                    }
-                                    _tagController.clear();
-                                  },
                                 ),
+                              ),
+                            ),
+
+                          const SizedBox(height: 10),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                '$words كلمة · $linesCount سطر · ${_contentController.text.length} حرف',
+                                style: TextStyle(
+                                  color: pal.textMuted,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              Row(
+                                children: [
+                                  TextButton(
+                                    onPressed: () =>
+                                        _insertTextAtCursor('\n• '),
+                                    child: Text(
+                                      '• نقطة',
+                                      style: TextStyle(
+                                        color: pal.textSecondary,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ),
+                                  TextButton(
+                                    onPressed: () =>
+                                        _insertTextAtCursor('\n──────────\n'),
+                                    child: Text(
+                                      '— فاصل',
+                                      style: TextStyle(
+                                        color: pal.textSecondary,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ],
                           ),
                         ],
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    if (_imagePaths.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: SizedBox(
-                          height: 108,
-                          child: ListView.builder(
-                            scrollDirection: Axis.horizontal,
-                            itemCount: _imagePaths.length,
-                            itemBuilder: (context, index) {
-                              final imgFile = File(_imagePaths[index]);
-                              return Stack(
-                                children: [
-                                  GestureDetector(
-                                    onTap: () => _viewGallery(index),
-                                    child: Container(
-                                      margin: const EdgeInsets.only(left: 10),
-                                      width: 108,
-                                      decoration: BoxDecoration(
-                                        borderRadius: BorderRadius.circular(16),
-                                        border:
-                                            Border.all(color: pal.glassBorder),
-                                        color: pal.chipBg,
-                                      ),
-                                      child: ClipRRect(
-                                        borderRadius: BorderRadius.circular(15),
-                                        child: imgFile.existsSync()
-                                            ? Image.file(
-                                                imgFile,
-                                                fit: BoxFit.cover,
-                                              )
-                                            : Icon(
-                                                Icons.broken_image_outlined,
-                                                color: pal.textMuted,
-                                              ),
-                                      ),
-                                    ),
-                                  ),
-                                  Positioned(
-                                    top: 4,
-                                    right: 4,
-                                    child: GestureDetector(
-                                      onTap: () => setState(
-                                        () => _imagePaths.removeAt(index),
-                                      ),
-                                      child: Container(
-                                        padding: const EdgeInsets.all(3),
-                                        decoration: const BoxDecoration(
-                                          color: Colors.black87,
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: const Icon(
-                                          Icons.close,
-                                          color: Colors.white,
-                                          size: 15,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              );
-                            },
-                          ),
+                  ),
+                ],
+              ),
+            ),
+            bottomNavigationBar: Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(context).viewInsets.bottom,
+              ),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+                decoration: BoxDecoration(
+                  color: pal.elevatedBg,
+                  border: Border(top: BorderSide(color: pal.divider)),
+                ),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      IconButton(
+                        tooltip: 'إدراج صور',
+                        icon: Icon(
+                          Icons.image_outlined,
+                          color: pal.textSecondary,
+                        ),
+                        onPressed: _pickImages,
+                      ),
+                      IconButton(
+                        tooltip: 'لوحة الرسم الحر',
+                        icon: Icon(
+                          Icons.brush_outlined,
+                          color: pal.textSecondary,
+                        ),
+                        onPressed: _openSketchStudio,
+                      ),
+                      IconButton(
+                        tooltip: 'تسجيل صوتي',
+                        icon: Icon(
+                          _isRecording ? Icons.stop_circle : Icons.mic_none,
+                          color:
+                              _isRecording ? Colors.red : pal.textSecondary,
+                          size: _isRecording ? 28 : 24,
+                        ),
+                        onPressed: _toggleRecording,
+                      ),
+                      IconButton(
+                        tooltip: 'وضع الكود البرمجي',
+                        icon: Icon(
+                          Icons.code,
+                          color: _isCodeActive
+                              ? pal.textPrimary
+                              : pal.textSecondary,
+                        ),
+                        onPressed: () {
+                          if (!_isCodeActive) {
+                            setState(() {
+                              _codeMode = 'on';
+                              _refreshCodeDetection();
+                            });
+                          } else {
+                            _showLanguagePicker(pal);
+                          }
+                        },
+                      ),
+                      IconButton(
+                        tooltip: 'قائمة مهام',
+                        icon: Icon(
+                          Icons.checklist_rounded,
+                          color: _showChecklistInput
+                              ? pal.textPrimary
+                              : pal.textSecondary,
+                        ),
+                        onPressed: () => setState(
+                          () => _showChecklistInput = !_showChecklistInput,
                         ),
                       ),
-                    if (_audioRecords.isNotEmpty)
-                      ...List.generate(_audioRecords.length, (index) {
-                        final record = _audioRecords[index];
-                        final path = record['path'] ?? '';
-                        final bool isPlayingThis =
-                            _currentlyPlayingPath == path;
-
-                        return Onyx3DGlassCard(
-                          margin: const EdgeInsets.only(bottom: 10),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 6,
-                          ),
-                          borderRadius: 16,
-                          child: Column(
-                            children: [
-                              Row(
-                                children: [
-                                  IconButton(
-                                    icon: Icon(
-                                      isPlayingThis
-                                          ? Icons.pause_circle_filled
-                                          : Icons.play_circle_fill,
-                                      color: isPlayingThis
-                                          ? pal.danger
-                                          : pal.textPrimary,
-                                      size: 32,
-                                    ),
-                                    onPressed: () => _togglePlayAudio(path),
-                                  ),
-                                  Expanded(
-                                    child: Text(
-                                      record['name'] ?? 'تسجيل صوتي',
-                                      style: TextStyle(
-                                        color: pal.textPrimary,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ),
-                                  IconButton(
-                                    icon: Icon(
-                                      Icons.edit,
-                                      color: pal.textMuted,
-                                      size: 19,
-                                    ),
-                                    onPressed: () => _renameAudio(index),
-                                  ),
-                                  IconButton(
-                                    icon: Icon(
-                                      Icons.close,
-                                      color: pal.danger,
-                                      size: 19,
-                                    ),
-                                    onPressed: () {
-                                      if (isPlayingThis) _audioPlayer.stop();
-                                      setState(() {
-                                        if (isPlayingThis) {
-                                          _currentlyPlayingPath = null;
-                                        }
-                                        _audioRecords.removeAt(index);
-                                      });
-                                    },
-                                  ),
-                                ],
-                              ),
-                              if (isPlayingThis &&
-                                  _playDuration.inMilliseconds > 0)
-                                Slider(
-                                  value: _playPosition.inMilliseconds
-                                      .clamp(0, _playDuration.inMilliseconds)
-                                      .toDouble(),
-                                  max: _playDuration.inMilliseconds.toDouble(),
-                                  activeColor: pal.accent,
-                                  onChanged: (v) => _audioPlayer.seek(
-                                    Duration(milliseconds: v.toInt()),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        );
-                      }),
-                    if (_showChecklistInput || _checklist.isNotEmpty)
-                      Onyx3DGlassCard(
-                        margin: const EdgeInsets.only(bottom: 12),
-                        padding: const EdgeInsets.all(14),
-                        borderRadius: 18,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(
-                                  'قائمة المهام ($doneCount/${_checklist.length})',
-                                  style: TextStyle(
-                                    color: pal.textPrimary,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 13.5,
-                                  ),
-                                ),
-                                if (_checklist.isNotEmpty)
-                                  Text(
-                                    '${((doneCount / _checklist.length) * 100).round()}%',
-                                    style: TextStyle(
-                                      color: pal.textSecondary,
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                              ],
-                            ),
-                            if (_checklist.isNotEmpty) ...[
-                              const SizedBox(height: 6),
-                              LinearProgressIndicator(
-                                value: doneCount / _checklist.length,
-                                backgroundColor: pal.chipBg,
-                                color: pal.accent,
-                                minHeight: 4,
-                              ),
-                            ],
-                            const SizedBox(height: 8),
-                            ...List.generate(_checklist.length, (i) {
-                              final item = _checklist[i];
-                              final bool done = item['done'] == true;
-                              return Row(
-                                children: [
-                                  Checkbox(
-                                    value: done,
-                                    activeColor: pal.accent,
-                                    checkColor: pal.onAccent,
-                                    onChanged: (v) => setState(
-                                      () => _checklist[i]['done'] = v ?? false,
-                                    ),
-                                  ),
-                                  Expanded(
-                                    child: Text(
-                                      item['text']?.toString() ?? '',
-                                      style: TextStyle(
-                                        color: done
-                                            ? pal.textMuted
-                                            : pal.textPrimary,
-                                        decoration: done
-                                            ? TextDecoration.lineThrough
-                                            : null,
-                                      ),
-                                    ),
-                                  ),
-                                  IconButton(
-                                    icon: Icon(
-                                      Icons.close,
-                                      size: 16,
-                                      color: pal.textMuted,
-                                    ),
-                                    onPressed: () =>
-                                        setState(() => _checklist.removeAt(i)),
-                                  ),
-                                ],
-                              );
-                            }),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: TextField(
-                                    controller: _todoController,
-                                    style: TextStyle(
-                                      color: pal.textPrimary,
-                                      fontSize: 13.5,
-                                    ),
-                                    decoration: InputDecoration(
-                                      isDense: true,
-                                      hintText: '+ أضف مهمة جديدة...',
-                                      hintStyle:
-                                          TextStyle(color: pal.textMuted),
-                                      border: InputBorder.none,
-                                    ),
-                                    onSubmitted: (val) {
-                                      if (val.trim().isEmpty) return;
-                                      setState(() {
-                                        _checklist.add({
-                                          'text': val.trim(),
-                                          'done': false,
-                                        });
-                                      });
-                                      _todoController.clear();
-                                    },
-                                  ),
-                                ),
-                                IconButton(
-                                  icon: Icon(
-                                    Icons.add_circle_outline,
-                                    color: pal.textPrimary,
-                                    size: 20,
-                                  ),
-                                  onPressed: () {
-                                    final val = _todoController.text.trim();
-                                    if (val.isEmpty) return;
-                                    setState(() {
-                                      _checklist.add({
-                                        'text': val,
-                                        'done': false,
-                                      });
-                                    });
-                                    _todoController.clear();
-                                  },
-                                ),
-                              ],
-                            ),
-                          ],
+                      IconButton(
+                        tooltip: 'الألوان',
+                        icon: Icon(
+                          Icons.color_lens_outlined,
+                          color: pal.textSecondary,
                         ),
+                        onPressed: _pickColor,
                       ),
-                    Onyx3DGlassCard(
-                      padding: const EdgeInsets.all(16),
-                      borderRadius: 24,
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(minHeight: 220),
-                        child: TextField(
-                          controller: _contentController,
-                          scrollController: _contentScrollController,
-                          maxLines: null,
-                          style: contentStyle,
-                          onChanged: (_) => setState(() {}),
-                          decoration: InputDecoration(
-                            hintText: 'اكتب ملاحظتك هنا...',
-                            hintStyle: TextStyle(color: pal.textMuted),
-                            border: InputBorder.none,
-                          ),
-                        ),
+                      IconButton(
+                        tooltip: 'الخط والحجم',
+                        icon: Icon(Icons.text_fields, color: pal.textSecondary),
+                        onPressed: _pickFont,
                       ),
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          '$words كلمة · ${_contentController.text.length} حرف',
-                          style: TextStyle(color: pal.textMuted, fontSize: 12),
+                      IconButton(
+                        tooltip: 'الحاسبة',
+                        icon: Icon(
+                          Icons.calculate_outlined,
+                          color: pal.textSecondary,
                         ),
-                        Row(
-                          children: [
-                            TextButton(
-                              onPressed: () => _insertTextAtCursor('\n• '),
-                              child: Text(
-                                '• نقطة',
-                                style: TextStyle(
-                                  color: pal.textSecondary,
-                                  fontSize: 12,
-                                ),
+                        onPressed: _showCalculatorDialog,
+                      ),
+                      IconButton(
+                        tooltip: 'خيارات وتذكير ومشاركة',
+                        icon: Icon(Icons.tune, color: pal.textSecondary),
+                        onPressed: _showSettingsSheet,
+                      ),
+                      const SizedBox(width: 6),
+                      DropdownButton<String>(
+                        value: _selectedCategory,
+                        dropdownColor: pal.elevatedBg,
+                        underline: const SizedBox.shrink(),
+                        icon:
+                            Icon(Icons.arrow_drop_down, color: pal.textPrimary),
+                        style:
+                            TextStyle(color: pal.textPrimary, fontSize: 13.5),
+                        items: _categories
+                            .map(
+                              (v) => DropdownMenuItem<String>(
+                                value: v,
+                                child: Text(v),
                               ),
-                            ),
-                            TextButton(
-                              onPressed: () =>
-                                  _insertTextAtCursor('\n──────────\n'),
-                              child: Text(
-                                '— فاصل',
-                                style: TextStyle(
-                                  color: pal.textSecondary,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ],
+                            )
+                            .toList(),
+                        onChanged: (val) {
+                          if (val != null) {
+                            setState(() => _selectedCategory = val);
+                          }
+                        },
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ],
-        ),
-      ),
-      bottomNavigationBar: Padding(
-        padding:
-            EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
-          decoration: BoxDecoration(
-            color: pal.elevatedBg,
-            border: Border(top: BorderSide(color: pal.divider)),
           ),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                IconButton(
-                  tooltip: 'إدراج صور',
-                  icon: Icon(Icons.image_outlined, color: pal.textSecondary),
-                  onPressed: _pickImages,
-                ),
-                IconButton(
-                  tooltip: 'لوحة الرسم الحر',
-                  icon: Icon(Icons.brush_outlined, color: pal.textSecondary),
-                  onPressed: _openSketchStudio,
-                ),
-                IconButton(
-                  tooltip: 'تسجيل صوتي',
-                  icon: Icon(
-                    _isRecording ? Icons.stop_circle : Icons.mic_none,
-                    color: _isRecording ? Colors.red : pal.textSecondary,
-                    size: _isRecording ? 28 : 24,
-                  ),
-                  onPressed: _toggleRecording,
-                ),
-                IconButton(
-                  tooltip: 'قائمة مهام',
-                  icon: Icon(
-                    Icons.checklist_rounded,
-                    color: _showChecklistInput
-                        ? pal.textPrimary
-                        : pal.textSecondary,
-                  ),
-                  onPressed: () => setState(
-                    () => _showChecklistInput = !_showChecklistInput,
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'الألوان',
-                  icon:
-                      Icon(Icons.color_lens_outlined, color: pal.textSecondary),
-                  onPressed: _pickColor,
-                ),
-                IconButton(
-                  tooltip: 'الخط والحجم',
-                  icon: Icon(Icons.text_fields, color: pal.textSecondary),
-                  onPressed: _pickFont,
-                ),
-                IconButton(
-                  tooltip: 'الحاسبة الذكية',
-                  icon:
-                      Icon(Icons.calculate_outlined, color: pal.textSecondary),
-                  onPressed: _showCalculatorDialog,
-                ),
-                IconButton(
-                  tooltip: 'خيارات وتذكير ومشاركة',
-                  icon: Icon(Icons.tune, color: pal.textSecondary),
-                  onPressed: _showSettingsSheet,
-                ),
-                const SizedBox(width: 6),
-                DropdownButton<String>(
-                  value: _selectedCategory,
-                  dropdownColor: pal.elevatedBg,
-                  underline: const SizedBox.shrink(),
-                  icon: Icon(Icons.arrow_drop_down, color: pal.textPrimary),
-                  style: TextStyle(color: pal.textPrimary, fontSize: 13.5),
-                  items: _categories
-                      .map(
-                        (v) =>
-                            DropdownMenuItem<String>(value: v, child: Text(v)),
-                      )
-                      .toList(),
-                  onChanged: (val) {
-                    if (val != null) setState(() => _selectedCategory = val);
-                  },
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
