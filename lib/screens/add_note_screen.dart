@@ -38,8 +38,21 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   late final CodeSyntaxTextController _contentController;
   final TextEditingController _tagController = TextEditingController();
   final TextEditingController _todoController = TextEditingController();
+  final ScrollController _outerScrollController = ScrollController();
+  final ScrollController _codeHorizScrollController = ScrollController();
   final ScrollController _contentScrollController = ScrollController();
+  final GlobalKey _editorAreaKey = GlobalKey();
   final List<TapGestureRecognizer> _linkRecognizers = [];
+
+  // شريط البحث والاستبدال الاحترافي
+  final TextEditingController _findController = TextEditingController();
+  final TextEditingController _replaceController = TextEditingController();
+  final FocusNode _findFocusNode = FocusNode();
+  bool _showFindBar = false;
+  bool _showReplaceRow = false;
+  bool _caseSensitive = false;
+  List<TextRange> _searchMatches = [];
+  int _activeMatchIndex = -1;
 
   String _selectedCategory = 'عام';
   int? _customTitleColor;
@@ -168,6 +181,11 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     _contentController.dispose();
     _tagController.dispose();
     _todoController.dispose();
+    _findController.dispose();
+    _replaceController.dispose();
+    _findFocusNode.dispose();
+    _outerScrollController.dispose();
+    _codeHorizScrollController.dispose();
     _contentScrollController.dispose();
     super.dispose();
   }
@@ -208,7 +226,11 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       _lastCommittedText = newVal;
     }
     _refreshCodeDetection();
-    setState(() {});
+    if (_showFindBar) {
+      _recomputeSearchMatches(jumpToFirst: false);
+    } else {
+      setState(() {});
+    }
   }
 
   void _undo() {
@@ -223,7 +245,11 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     );
     _applyingHistory = false;
     _refreshCodeDetection();
-    setState(() {});
+    if (_showFindBar) {
+      _recomputeSearchMatches(jumpToFirst: false);
+    } else {
+      setState(() {});
+    }
   }
 
   void _redo() {
@@ -238,7 +264,366 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     );
     _applyingHistory = false;
     _refreshCodeDetection();
-    setState(() {});
+    if (_showFindBar) {
+      _recomputeSearchMatches(jumpToFirst: false);
+    } else {
+      setState(() {});
+    }
+  }
+
+  // ==================== محرك البحث والاستبدال الاحترافي ====================
+  void _toggleFindBar({bool focusInput = true}) {
+    setState(() {
+      _showFindBar = !_showFindBar;
+      if (!_showFindBar) {
+        _searchMatches = [];
+        _activeMatchIndex = -1;
+        _contentController.searchMatches = const [];
+        _contentController.activeMatchIndex = -1;
+      } else {
+        _recomputeSearchMatches(jumpToFirst: false);
+      }
+    });
+    if (_showFindBar && focusInput) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _findFocusNode.requestFocus(),
+      );
+    }
+  }
+
+  int? _parseLineJumpQuery(String q) {
+    final clean = q.trim();
+    if (clean.startsWith(':') && clean.length > 1) {
+      return int.tryParse(clean.substring(1).trim());
+    }
+    if (clean.startsWith('#') && clean.length > 1 && _isCodeActive) {
+      return int.tryParse(clean.substring(1).trim());
+    }
+    return null;
+  }
+
+  void _recomputeSearchMatches({
+    bool jumpToFirst = true,
+    int? keepOffsetNear,
+  }) {
+    final rawQuery = _findController.text;
+    final text = _contentController.text;
+
+    if (rawQuery.isEmpty) {
+      setState(() {
+        _searchMatches = [];
+        _activeMatchIndex = -1;
+        _contentController.searchMatches = const [];
+        _contentController.activeMatchIndex = -1;
+      });
+      return;
+    }
+
+    final int? jumpLine = _parseLineJumpQuery(rawQuery);
+    if (jumpLine != null) {
+      setState(() {
+        _searchMatches = [];
+        _activeMatchIndex = -1;
+        _contentController.searchMatches = const [];
+        _contentController.activeMatchIndex = -1;
+      });
+      if (jumpToFirst) {
+        _jumpToLineNumber(jumpLine);
+      }
+      return;
+    }
+
+    final String haystack = _caseSensitive ? text : text.toLowerCase();
+    final String needle = _caseSensitive ? rawQuery : rawQuery.toLowerCase();
+    final List<TextRange> found = [];
+
+    int start = 0;
+    while (start <= haystack.length - needle.length) {
+      final idx = haystack.indexOf(needle, start);
+      if (idx == -1) break;
+      found.add(TextRange(start: idx, end: idx + needle.length));
+      start = idx + math.max(1, needle.length);
+    }
+
+    int nextIdx = found.isEmpty ? -1 : 0;
+    if (found.isNotEmpty && keepOffsetNear != null) {
+      for (int k = 0; k < found.length; k++) {
+        if (found[k].start >= keepOffsetNear) {
+          nextIdx = k;
+          break;
+        }
+      }
+    }
+
+    setState(() {
+      _searchMatches = found;
+      _activeMatchIndex = nextIdx;
+      _contentController.searchMatches = found;
+      _contentController.activeMatchIndex = nextIdx;
+    });
+
+    if (jumpToFirst && nextIdx >= 0) {
+      _scrollToTextOffset(found[nextIdx].start);
+    }
+  }
+
+  void _stepMatch(int delta) {
+    final int? jumpLine = _parseLineJumpQuery(_findController.text);
+    if (jumpLine != null) {
+      _jumpToLineNumber(jumpLine);
+      return;
+    }
+    if (_searchMatches.isEmpty) return;
+    final int count = _searchMatches.length;
+    final int target = (_activeMatchIndex + delta + count) % count;
+    setState(() {
+      _activeMatchIndex = target;
+      _contentController.activeMatchIndex = target;
+    });
+    _scrollToTextOffset(_searchMatches[target].start);
+  }
+
+  void _replaceCurrentMatch() {
+    if (_searchMatches.isEmpty ||
+        _activeMatchIndex < 0 ||
+        _activeMatchIndex >= _searchMatches.length) {
+      return;
+    }
+    final range = _searchMatches[_activeMatchIndex];
+    final replacement = _replaceController.text;
+    final currentText = _contentController.text;
+    if (range.end > currentText.length) return;
+
+    final newText = currentText.replaceRange(range.start, range.end, replacement);
+    _undoStack.add(_lastCommittedText);
+    if (_undoStack.length > 40) _undoStack.removeAt(0);
+    _redoStack.clear();
+    _lastCommittedText = newText;
+
+    _applyingHistory = true;
+    _contentController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: range.start + replacement.length),
+    );
+    _applyingHistory = false;
+
+    _refreshCodeDetection();
+    _recomputeSearchMatches(
+      jumpToFirst: true,
+      keepOffsetNear: range.start + replacement.length,
+    );
+  }
+
+  void _replaceAllMatches() {
+    if (_searchMatches.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لا توجد نتائج مطابقة للاستبدال')),
+      );
+      return;
+    }
+
+    final int replacedCount = _searchMatches.length;
+    final replacement = _replaceController.text;
+    final currentText = _contentController.text;
+
+    final StringBuffer buf = StringBuffer();
+    int pos = 0;
+    for (final range in _searchMatches) {
+      if (range.start > pos) {
+        buf.write(currentText.substring(pos, range.start));
+      }
+      buf.write(replacement);
+      pos = range.end;
+    }
+    if (pos < currentText.length) {
+      buf.write(currentText.substring(pos));
+    }
+
+    final newText = buf.toString();
+    _undoStack.add(_lastCommittedText);
+    if (_undoStack.length > 40) _undoStack.removeAt(0);
+    _redoStack.clear();
+    _lastCommittedText = newText;
+
+    _applyingHistory = true;
+    _contentController.value = TextEditingValue(
+      text: newText,
+      selection: const TextSelection.collapsed(offset: 0),
+    );
+    _applyingHistory = false;
+
+    _refreshCodeDetection();
+    _recomputeSearchMatches(jumpToFirst: false);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('تم استبدال $replacedCount نتيجة بنجاح')),
+    );
+  }
+
+  void _jumpToLineNumber(int lineNum) {
+    final lines = _contentController.text.split('\n');
+    final int safeLine = lineNum.clamp(1, math.max(1, lines.length));
+    int offset = 0;
+    for (int i = 0; i < safeLine - 1; i++) {
+      offset += lines[i].length + 1;
+    }
+    _scrollToTextOffset(offset);
+  }
+
+  void _scrollToTextOffset(int charOffset) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final box = _editorAreaKey.currentContext?.findRenderObject() as RenderBox?;
+      if (box == null || !_outerScrollController.hasClients) return;
+
+      final scrollCtx = _outerScrollController.position.context.notificationContext;
+      final viewportBox = scrollCtx?.findRenderObject() as RenderBox?;
+      final double dyInViewport = viewportBox != null
+          ? box.localToGlobal(Offset.zero, ancestor: viewportBox).dy
+          : box.localToGlobal(Offset.zero).dy - 140.0;
+      final double cardTopInScroll = _outerScrollController.offset + dyInViewport;
+      final double viewportH = _outerScrollController.position.viewportDimension;
+      final text = _contentController.text;
+      final safeOffset = charOffset.clamp(0, text.length);
+
+      if (_isCodeActive) {
+        final before = text.substring(0, safeOffset);
+        final linesBefore = before.split('\n');
+        final int lineIdx = linesBefore.length - 1;
+        final String linePrefix = linesBefore.last;
+
+        final double codeFontSize = _contentFontSize.clamp(12.0, 20.0);
+        final codeStyle = TextStyle(
+          fontFamily: 'monospace',
+          fontSize: codeFontSize,
+          height: 1.55,
+        );
+        final codeStrut = StrutStyle(
+          fontFamily: 'monospace',
+          fontSize: codeFontSize,
+          height: 1.55,
+          forceStrutHeight: true,
+        );
+        final scaler = MediaQuery.textScalerOf(context);
+        final double lineH = _measureExactLineHeight(codeStyle, codeStrut, scaler);
+
+        // +46px ارتفاع شريط الرموز السريعة فوق الكود
+        final double targetY =
+            (cardTopInScroll + 46.0 + (lineIdx * lineH) - (viewportH * 0.35))
+                .clamp(0.0, _outerScrollController.position.maxScrollExtent);
+
+        _outerScrollController.animateTo(
+          targetY,
+          duration: const Duration(milliseconds: 260),
+          curve: Curves.easeOutCubic,
+        );
+
+        if (_codeHorizScrollController.hasClients) {
+          final tp = TextPainter(
+            text: TextSpan(text: linePrefix, style: codeStyle),
+            textDirection: TextDirection.ltr,
+            textScaler: scaler,
+          )..layout();
+          final double targetX = (tp.width - 70.0).clamp(
+            0.0,
+            _codeHorizScrollController.position.maxScrollExtent,
+          );
+          _codeHorizScrollController.animateTo(
+            targetX,
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+          );
+        }
+      } else {
+        final double availW = math.max(120.0, box.size.width - 32.0);
+        final pal = OnyxPalette.of(OnyxSettings.isDark);
+        final contentStyle = applyArabicFont(
+          _fontFamily,
+          TextStyle(
+            fontSize: _contentFontSize,
+            color: pal.textPrimary,
+            height: 1.65,
+          ),
+        );
+        final tp = TextPainter(
+          text: TextSpan(text: text, style: contentStyle),
+          textDirection: TextDirection.rtl,
+          textScaler: MediaQuery.textScalerOf(context),
+        )..layout(maxWidth: availW);
+        final caretOffset =
+            tp.getOffsetForCaret(TextPosition(offset: safeOffset), Rect.zero);
+        final double targetY =
+            (cardTopInScroll + 16.0 + caretOffset.dy - (viewportH * 0.35))
+                .clamp(0.0, _outerScrollController.position.maxScrollExtent);
+        _outerScrollController.animateTo(
+          targetY,
+          duration: const Duration(milliseconds: 260),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    });
+  }
+
+  // ==================== قياس دقيق لمنع التفاف أي رقم سطر أو سطر كود ====================
+  double _measureExactLineHeight(
+    TextStyle style,
+    StrutStyle strut,
+    TextScaler scaler,
+  ) {
+    final tp = TextPainter(
+      text: TextSpan(text: '0\n0\n0\n0\n0', style: style),
+      strutStyle: strut,
+      textDirection: TextDirection.ltr,
+      textScaler: scaler,
+    )..layout();
+    return tp.height / 5.0;
+  }
+
+  double _measureGutterWidth(
+    int lineCount,
+    TextStyle style,
+    TextScaler scaler,
+  ) {
+    final digits = math.max(2, lineCount.toString().length);
+    final tp = TextPainter(
+      text: TextSpan(text: '8' * digits, style: style),
+      textDirection: TextDirection.ltr,
+      textScaler: scaler,
+    )..layout();
+    return tp.width + 22.0;
+  }
+
+  double _measureLongestLineWidth(
+    List<String> lines,
+    TextStyle style,
+    TextScaler scaler,
+    double minWidth,
+  ) {
+    // نفحص أطول 8 أسطر لتفادي القياس البطيء على آلاف الأسطر
+    final List<String> topLines = [];
+    int thresholdLen = 40;
+    for (final l in lines) {
+      if (l.length >= thresholdLen) {
+        topLines.add(l);
+        if (topLines.length > 16) {
+          topLines.sort((a, b) => b.length.compareTo(a.length));
+          topLines.removeRange(8, topLines.length);
+          thresholdLen = topLines.last.length;
+        }
+      }
+    }
+    double maxW = minWidth;
+    for (final sample in topLines) {
+      final tp = TextPainter(
+        text: TextSpan(text: sample, style: style),
+        textDirection: TextDirection.ltr,
+        textScaler: scaler,
+      )..layout();
+      if (tp.width + 80.0 > maxW) {
+        maxW = tp.width + 80.0;
+      }
+    }
+    return maxW;
   }
 
   String _computeSignature() {
@@ -454,7 +839,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
 
     if (time == null || !mounted) return;
     final now = DateTime.now();
-    final candidate = DateTime(now.year, now.month, now.day, time.hour, time.minute);
+    final candidate =
+        DateTime(now.year, now.month, now.day, time.hour, time.minute);
     final bool isTomorrow = candidate.isBefore(now);
 
     final ok = await NotificationService.scheduleAlarmReminder(
@@ -476,58 +862,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     }
   }
 
-  void _searchInNote() {
-    final pal = OnyxPalette.of(OnyxSettings.isDark);
-    final searchController = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: pal.elevatedBg,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(22),
-          side: BorderSide(color: pal.glassBorder),
-        ),
-        title:
-            Text('البحث داخل الملاحظة', style: TextStyle(color: pal.textPrimary)),
-        content: TextField(
-          controller: searchController,
-          autofocus: true,
-          style: TextStyle(color: pal.textPrimary),
-          decoration: InputDecoration(
-            hintText: 'أدخل الكلمة للبحث...',
-            hintStyle: TextStyle(color: pal.textMuted),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: Text('إلغاء', style: TextStyle(color: pal.textMuted)),
-          ),
-          TextButton(
-            onPressed: () {
-              final query = searchController.text;
-              Navigator.pop(ctx);
-              if (query.isEmpty) return;
-              final startIndex = _contentController.text.indexOf(query);
-              if (startIndex != -1) {
-                setState(() => _isReadingMode = false);
-                _contentController.selection = TextSelection(
-                  baseOffset: startIndex,
-                  extentOffset: startIndex + query.length,
-                );
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('لم يتم العثور على النص.')),
-                );
-              }
-            },
-            child: Text('بحث', style: TextStyle(color: pal.textPrimary)),
-          ),
-        ],
-      ),
-    );
-  }
-
   void _pickColor() {
     final pal = OnyxPalette.of(OnyxSettings.isDark);
     final Color currentColor =
@@ -541,7 +875,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
           borderRadius: BorderRadius.circular(22),
           side: BorderSide(color: pal.glassBorder),
         ),
-        title: Text('اختر لون الملاحظة', style: TextStyle(color: pal.textPrimary)),
+        title:
+            Text('اختر لون الملاحظة', style: TextStyle(color: pal.textPrimary)),
         content: SingleChildScrollView(
           child: ColorPicker(
             pickerColor: currentColor,
@@ -1185,14 +1520,18 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                     onTap: _setReminder,
                   ),
                   ListTile(
-                    leading: Icon(Icons.search, color: pal.textPrimary),
+                    leading: Icon(Icons.find_in_page_outlined, color: pal.textPrimary),
                     title: Text(
-                      'البحث عن نص داخل الملاحظة',
+                      'البحث والاستبدال داخل الملاحظة',
                       style: TextStyle(color: pal.textPrimary),
                     ),
                     onTap: () {
                       Navigator.pop(ctx);
-                      _searchInNote();
+                      if (!_showFindBar) {
+                        _toggleFindBar();
+                      } else {
+                        _findFocusNode.requestFocus();
+                      }
                     },
                   ),
                   ListTile(
@@ -1354,6 +1693,222 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     return clean.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
   }
 
+  Widget _buildFindAndReplaceBar(OnyxPalette pal) {
+    final int? lineJumpTarget = _parseLineJumpQuery(_findController.text);
+    final int total = _searchMatches.length;
+    final String countText = lineJumpTarget != null
+        ? 'سطر $lineJumpTarget'
+        : total == 0
+            ? '0 / 0'
+            : '${_activeMatchIndex + 1} / $total';
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
+      child: Onyx3DGlassCard(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        borderRadius: 18,
+        isHighlighted: true,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                GestureDetector(
+                  onTap: () => setState(() => _showReplaceRow = !_showReplaceRow),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Icon(
+                      _showReplaceRow
+                          ? Icons.keyboard_arrow_down
+                          : Icons.find_replace_rounded,
+                      color: pal.textPrimary,
+                      size: 20,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: TextField(
+                    controller: _findController,
+                    focusNode: _findFocusNode,
+                    style: TextStyle(color: pal.textPrimary, fontSize: 13.5),
+                    onChanged: (_) => _recomputeSearchMatches(jumpToFirst: true),
+                    onSubmitted: (_) => _stepMatch(1),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      hintText: 'بحث عن كلمة، سطر، أو :رقم السطر',
+                      hintStyle: TextStyle(color: pal.textMuted, fontSize: 12),
+                      filled: true,
+                      fillColor: pal.inputFill,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: BorderSide(color: pal.glassBorder),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: pal.chipBg,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    countText,
+                    style: TextStyle(
+                      color: total > 0 || lineJumpTarget != null
+                          ? pal.textPrimary
+                          : pal.textMuted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () {
+                    setState(() => _caseSensitive = !_caseSensitive);
+                    _recomputeSearchMatches(jumpToFirst: true);
+                  },
+                  child: Container(
+                    margin: const EdgeInsets.only(right: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _caseSensitive ? pal.accent : Colors.transparent,
+                      borderRadius: BorderRadius.circular(7),
+                      border: Border.all(color: pal.glassBorder),
+                    ),
+                    child: Text(
+                      'Aa',
+                      style: TextStyle(
+                        color: _caseSensitive ? pal.onAccent : pal.textMuted,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'النتيجة السابقة',
+                  icon: Icon(
+                    Icons.keyboard_arrow_up,
+                    color: total > 0 ? pal.textPrimary : pal.textMuted,
+                    size: 22,
+                  ),
+                  onPressed: total > 0 ? () => _stepMatch(-1) : null,
+                ),
+                IconButton(
+                  constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'النتيجة التالية',
+                  icon: Icon(
+                    Icons.keyboard_arrow_down,
+                    color: total > 0 || lineJumpTarget != null
+                        ? pal.textPrimary
+                        : pal.textMuted,
+                    size: 22,
+                  ),
+                  onPressed:
+                      total > 0 || lineJumpTarget != null ? () => _stepMatch(1) : null,
+                ),
+                IconButton(
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  padding: EdgeInsets.zero,
+                  tooltip: 'إغلاق البحث',
+                  icon: Icon(Icons.close, color: pal.textMuted, size: 18),
+                  onPressed: _toggleFindBar,
+                ),
+              ],
+            ),
+            if (_showReplaceRow) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _replaceController,
+                      maxLines: null,
+                      style: TextStyle(color: pal.textPrimary, fontSize: 13.5),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 8,
+                        ),
+                        hintText: 'استبدال بالكلمة أو السطر الجديد...',
+                        hintStyle: TextStyle(color: pal.textMuted, fontSize: 12),
+                        filled: true,
+                        fillColor: pal.inputFill,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: BorderSide(color: pal.glassBorder),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  TextButton(
+                    style: TextButton.styleFrom(
+                      backgroundColor: pal.chipBg,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      minimumSize: Size.zero,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                    ),
+                    onPressed: total > 0 ? _replaceCurrentMatch : null,
+                    child: Text(
+                      'استبدال',
+                      style: TextStyle(
+                        color: total > 0 ? pal.textPrimary : pal.textMuted,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  TextButton(
+                    style: TextButton.styleFrom(
+                      backgroundColor: pal.accent,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      minimumSize: Size.zero,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                    ),
+                    onPressed: total > 0 ? _replaceAllMatches : null,
+                    child: Text(
+                      'الكل',
+                      style: TextStyle(
+                        color: pal.onAccent,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildReadableNoteArea(OnyxPalette pal, TextStyle contentStyle) {
     _disposeLinkRecognizers();
     final text = _contentController.text;
@@ -1397,6 +1952,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     }
 
     return Onyx3DGlassCard(
+      key: _editorAreaKey,
       padding: const EdgeInsets.all(16),
       borderRadius: 24,
       child: ConstrainedBox(
@@ -1515,11 +2071,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     final lines = _contentController.text.split('\n');
     final int lineCount = math.max(1, lines.length);
     final double codeFontSize = _contentFontSize.clamp(12.0, 20.0);
-
-    int maxCols = 32;
-    for (final line in lines) {
-      if (line.length > maxCols) maxCols = line.length;
-    }
+    final scaler = MediaQuery.textScalerOf(context);
 
     final TextStyle codeStyle = TextStyle(
       fontFamily: 'monospace',
@@ -1534,7 +2086,26 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       forceStrutHeight: true,
     );
 
+    final double exactLineHeight =
+        _measureExactLineHeight(codeStyle, codeStrut, scaler);
+    final double gutterWidth = _measureGutterWidth(lineCount, codeStyle, scaler);
+    final double totalCodeHeight = math.max(240.0, lineCount * exactLineHeight + 24.0);
+
+    // رقم السطر النشط (نتيجة البحث الحالية أو موضع المؤشر)
+    int activeLine = -1;
+    if (_activeMatchIndex >= 0 && _activeMatchIndex < _searchMatches.length) {
+      final off = _searchMatches[_activeMatchIndex].start
+          .clamp(0, _contentController.text.length);
+      activeLine = '\n'.allMatches(_contentController.text.substring(0, off)).length;
+    } else if (_contentController.selection.isValid &&
+        _contentController.selection.start >= 0) {
+      final off = _contentController.selection.start
+          .clamp(0, _contentController.text.length);
+      activeLine = '\n'.allMatches(_contentController.text.substring(0, off)).length;
+    }
+
     return Onyx3DGlassCard(
+      key: _editorAreaKey,
       padding: EdgeInsets.zero,
       borderRadius: 20,
       isHighlighted: true,
@@ -1591,52 +2162,56 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
             textDirection: TextDirection.ltr,
             child: LayoutBuilder(
               builder: (context, constraints) {
-                final double gutterWidth =
-                    lineCount >= 100 ? 48.0 : (lineCount >= 10 ? 40.0 : 34.0);
-                final double editorWidth = math.max(
-                  constraints.maxWidth - gutterWidth - 8,
-                  maxCols * (codeFontSize * 0.64) + 60,
+                final double minAvailW =
+                    math.max(160.0, constraints.maxWidth - gutterWidth - 8);
+                final double editorWidth = _measureLongestLineWidth(
+                  lines,
+                  codeStyle,
+                  scaler,
+                  minAvailW,
                 );
 
                 return Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // عمود الأرقام المرسوم برمجيًا (لا يلتف أبدًا ولا يبطئ حتى 100 ألف سطر)
                     Container(
                       width: gutterWidth,
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 12,
-                        horizontal: 6,
-                      ),
+                      height: totalCodeHeight,
                       decoration: BoxDecoration(
                         color: pal.isDark
                             ? Colors.black.withOpacity(0.32)
                             : Colors.black.withOpacity(0.04),
                         border: Border(right: BorderSide(color: pal.divider)),
                       ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: List.generate(
-                          lineCount,
-                          (idx) => Text(
-                            '${idx + 1}',
-                            strutStyle: codeStrut,
-                            style: TextStyle(
-                              fontFamily: 'monospace',
-                              fontSize: codeFontSize,
-                              height: 1.55,
-                              color: pal.textMuted,
+                      child: AnimatedBuilder(
+                        animation: _outerScrollController,
+                        builder: (context, _) {
+                          return CustomPaint(
+                            size: Size(gutterWidth, totalCodeHeight),
+                            painter: _ViewportLineNumbersPainter(
+                              lineCount: lineCount,
+                              lineHeight: exactLineHeight,
+                              activeLine: activeLine,
+                              style: codeStyle,
+                              textScaler: scaler,
+                              normalColor: pal.textMuted,
+                              activeColor: pal.textPrimary,
+                              editorAreaKey: _editorAreaKey,
+                              screenHeight: MediaQuery.of(context).size.height,
                             ),
-                          ),
-                        ),
+                          );
+                        },
                       ),
                     ),
                     Expanded(
                       child: SingleChildScrollView(
+                        controller: _codeHorizScrollController,
                         scrollDirection: Axis.horizontal,
                         child: SizedBox(
                           width: editorWidth,
                           child: ConstrainedBox(
-                            constraints: const BoxConstraints(minHeight: 240),
+                            constraints: BoxConstraints(minHeight: totalCodeHeight),
                             child: TextField(
                               controller: _contentController,
                               scrollController: _contentScrollController,
@@ -1645,6 +2220,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                               strutStyle: codeStrut,
                               onChanged: _onContentChanged,
                               decoration: InputDecoration(
+                                isDense: true,
                                 contentPadding: const EdgeInsets.all(12),
                                 hintText: '// اكتب أو الصق الكود البرمجي هنا...',
                                 hintStyle: TextStyle(
@@ -1666,6 +2242,14 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
         ],
       ),
     );
+  }
+
+  List<double> _computeMatchFractions() {
+    final totalLen = _contentController.text.length;
+    if (totalLen == 0 || _searchMatches.isEmpty) return const [];
+    return _searchMatches
+        .map((m) => (m.start / totalLen).clamp(0.0, 1.0))
+        .toList();
   }
 
   @override
@@ -1726,13 +2310,22 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
               ),
               actions: [
                 IconButton(
+                  tooltip: 'البحث والاستبدال',
+                  icon: Icon(
+                    _showFindBar ? Icons.search_off : Icons.search,
+                    size: 21,
+                    color: _showFindBar ? pal.accent : pal.textPrimary,
+                  ),
+                  onPressed: _toggleFindBar,
+                ),
+                IconButton(
                   tooltip:
                       _isReadingMode ? 'وضع التحرير' : 'وضع القراءة والروابط',
                   icon: Icon(
                     _isReadingMode
                         ? Icons.edit_outlined
                         : Icons.visibility_outlined,
-                    size: 21,
+                    size: 20,
                     color: pal.textPrimary,
                   ),
                   onPressed: () =>
@@ -1742,7 +2335,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   tooltip: 'تراجع',
                   icon: Icon(
                     Icons.undo,
-                    size: 21,
+                    size: 20,
                     color: _undoStack.isEmpty ? pal.textMuted : pal.textPrimary,
                   ),
                   onPressed: _undoStack.isEmpty ? null : _undo,
@@ -1751,7 +2344,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   tooltip: 'إعادة',
                   icon: Icon(
                     Icons.redo,
-                    size: 21,
+                    size: 20,
                     color: _redoStack.isEmpty ? pal.textMuted : pal.textPrimary,
                   ),
                   onPressed: _redoStack.isEmpty ? null : _redo,
@@ -1760,7 +2353,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   tooltip: _isLocked ? 'مقفلة' : 'قفل الملاحظة',
                   icon: Icon(
                     _isLocked ? Icons.lock : Icons.lock_open_outlined,
-                    size: 20,
+                    size: 19,
                     color: _isLocked ? pal.textPrimary : pal.textMuted,
                   ),
                   onPressed: () => setState(() => _isLocked = !_isLocked),
@@ -1769,7 +2362,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   tooltip: 'تثبيت',
                   icon: Icon(
                     _isPinned ? Icons.push_pin : Icons.push_pin_outlined,
-                    size: 20,
+                    size: 19,
                     color: _isPinned ? Colors.amber : pal.textPrimary,
                   ),
                   onPressed: () => setState(() => _isPinned = !_isPinned),
@@ -1785,643 +2378,683 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
               palette: pal,
               child: Column(
                 children: [
+                  if (_showFindBar) _buildFindAndReplaceBar(pal),
                   Expanded(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (activeLang != null)
-                            Onyx3DGlassCard(
-                              margin: const EdgeInsets.only(bottom: 12),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                                vertical: 9,
-                              ),
-                              borderRadius: 16,
-                              isHighlighted: true,
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    Icons.code,
-                                    color: pal.textPrimary,
-                                    size: 19,
+                    child: Stack(
+                      children: [
+                        SingleChildScrollView(
+                          controller: _outerScrollController,
+                          padding: const EdgeInsets.fromLTRB(16, 12, 22, 24),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (activeLang != null)
+                                Onyx3DGlassCard(
+                                  margin: const EdgeInsets.only(bottom: 12),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                    vertical: 9,
                                   ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: GestureDetector(
-                                      onTap: () => _showLanguagePicker(pal),
-                                      child: Row(
+                                  borderRadius: 16,
+                                  isHighlighted: true,
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        Icons.code,
+                                        color: pal.textPrimary,
+                                        size: 19,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: GestureDetector(
+                                          onTap: () => _showLanguagePicker(pal),
+                                          child: Row(
+                                            children: [
+                                              Text(
+                                                activeLang.displayName,
+                                                style: TextStyle(
+                                                  color: pal.textPrimary,
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 13.5,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 4),
+                                              Icon(
+                                                Icons.arrow_drop_down,
+                                                color: pal.textSecondary,
+                                                size: 18,
+                                              ),
+                                              const SizedBox(width: 6),
+                                              Text(
+                                                '· $linesCount سطر',
+                                                style: TextStyle(
+                                                  color: pal.textMuted,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                      IconButton(
+                                        visualDensity: VisualDensity.compact,
+                                        tooltip: 'نسخ الكود',
+                                        icon: Icon(
+                                          Icons.copy_all,
+                                          size: 18,
+                                          color: pal.textPrimary,
+                                        ),
+                                        onPressed: () {
+                                          Clipboard.setData(
+                                            ClipboardData(
+                                              text: _contentController.text,
+                                            ),
+                                          );
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(
+                                            const SnackBar(
+                                              content:
+                                                  Text('تم نسخ الكود بنجاح'),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                      IconButton(
+                                        visualDensity: VisualDensity.compact,
+                                        tooltip: 'إيقاف عرض الكود',
+                                        icon: Icon(
+                                          Icons.close,
+                                          size: 18,
+                                          color: pal.textMuted,
+                                        ),
+                                        onPressed: () {
+                                          setState(() {
+                                            _codeMode = 'off';
+                                            _refreshCodeDetection();
+                                          });
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
+                              if (_isRecording)
+                                Onyx3DGlassCard(
+                                  margin: const EdgeInsets.only(bottom: 14),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 12,
+                                  ),
+                                  borderRadius: 18,
+                                  isHighlighted: true,
+                                  enableShimmer: true,
+                                  child: Row(
+                                    children: [
+                                      const Icon(
+                                        Icons.mic,
+                                        color: Colors.red,
+                                        size: 26,
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              'جاري التسجيل... ${_formatSeconds(_recordSeconds)}',
+                                              style: const TextStyle(
+                                                color: Colors.redAccent,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 15,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 6),
+                                            _RecordingWaveBars(
+                                              seed: _recordSeconds,
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      ElevatedButton.icon(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.red,
+                                          foregroundColor: Colors.white,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(12),
+                                          ),
+                                        ),
+                                        onPressed: _toggleRecording,
+                                        icon: const Icon(Icons.stop, size: 18),
+                                        label: const Text('إيقاف'),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
+                              Onyx3DGlassCard(
+                                padding:
+                                    const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                                borderRadius: 24,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    TextField(
+                                      controller: _titleController,
+                                      readOnly: _isReadingMode,
+                                      style: titleStyle,
+                                      onChanged: (_) => setState(() {}),
+                                      decoration: InputDecoration(
+                                        hintText: 'عنوان الملاحظة...',
+                                        hintStyle:
+                                            TextStyle(color: pal.textMuted),
+                                        border: InputBorder.none,
+                                      ),
+                                    ),
+                                    Divider(color: pal.divider),
+                                    Wrap(
+                                      spacing: 6,
+                                      runSpacing: 6,
+                                      crossAxisAlignment:
+                                          WrapCrossAlignment.center,
+                                      children: [
+                                        ..._tags.map(
+                                          (tag) => Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 10,
+                                              vertical: 4,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: pal.chipBg,
+                                              borderRadius:
+                                                  BorderRadius.circular(99),
+                                              border: Border.all(
+                                                color: pal.glassBorder,
+                                              ),
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  '#$tag',
+                                                  style: TextStyle(
+                                                    color: pal.textSecondary,
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 4),
+                                                GestureDetector(
+                                                  onTap: () => setState(
+                                                    () => _tags.remove(tag),
+                                                  ),
+                                                  child: Icon(
+                                                    Icons.close,
+                                                    size: 13,
+                                                    color: pal.textMuted,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
+                                        if (!_isReadingMode)
+                                          SizedBox(
+                                            width: 135,
+                                            child: TextField(
+                                              controller: _tagController,
+                                              style: TextStyle(
+                                                color: pal.textPrimary,
+                                                fontSize: 12.5,
+                                              ),
+                                              decoration: InputDecoration(
+                                                isDense: true,
+                                                hintText: '+ أضف وسماً...',
+                                                hintStyle: TextStyle(
+                                                  color: pal.textMuted,
+                                                  fontSize: 12,
+                                                ),
+                                                border: InputBorder.none,
+                                              ),
+                                              onSubmitted: (val) {
+                                                final clean = val
+                                                    .trim()
+                                                    .replaceAll('#', '');
+                                                if (clean.isNotEmpty &&
+                                                    !_tags.contains(clean)) {
+                                                  setState(
+                                                    () => _tags.add(clean),
+                                                  );
+                                                }
+                                                _tagController.clear();
+                                              },
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+
+                              if (_imagePaths.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 12),
+                                  child: SizedBox(
+                                    height: 108,
+                                    child: ListView.builder(
+                                      scrollDirection: Axis.horizontal,
+                                      itemCount: _imagePaths.length,
+                                      itemBuilder: (context, index) {
+                                        final imgFile =
+                                            File(_imagePaths[index]);
+                                        return Stack(
+                                          children: [
+                                            GestureDetector(
+                                              onTap: () => _viewGallery(index),
+                                              child: Container(
+                                                margin: const EdgeInsets.only(
+                                                  left: 10,
+                                                ),
+                                                width: 108,
+                                                decoration: BoxDecoration(
+                                                  borderRadius:
+                                                      BorderRadius.circular(16),
+                                                  border: Border.all(
+                                                    color: pal.glassBorder,
+                                                  ),
+                                                  color: pal.chipBg,
+                                                ),
+                                                child: ClipRRect(
+                                                  borderRadius:
+                                                      BorderRadius.circular(15),
+                                                  child: imgFile.existsSync()
+                                                      ? Image.file(
+                                                          imgFile,
+                                                          fit: BoxFit.cover,
+                                                        )
+                                                      : Icon(
+                                                          Icons
+                                                              .broken_image_outlined,
+                                                          color: pal.textMuted,
+                                                        ),
+                                                ),
+                                              ),
+                                            ),
+                                            Positioned(
+                                              top: 4,
+                                              right: 4,
+                                              child: GestureDetector(
+                                                onTap: () => setState(
+                                                  () => _imagePaths
+                                                      .removeAt(index),
+                                                ),
+                                                child: Container(
+                                                  padding:
+                                                      const EdgeInsets.all(3),
+                                                  decoration:
+                                                      const BoxDecoration(
+                                                    color: Colors.black87,
+                                                    shape: BoxShape.circle,
+                                                  ),
+                                                  child: const Icon(
+                                                    Icons.close,
+                                                    color: Colors.white,
+                                                    size: 15,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                ),
+
+                              if (_audioRecords.isNotEmpty)
+                                ...List.generate(_audioRecords.length, (index) {
+                                  final record = _audioRecords[index];
+                                  final path = record['path'] ?? '';
+                                  final bool isPlayingThis =
+                                      _currentlyPlayingPath == path;
+
+                                  return Onyx3DGlassCard(
+                                    margin: const EdgeInsets.only(bottom: 10),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 6,
+                                    ),
+                                    borderRadius: 16,
+                                    child: Column(
+                                      children: [
+                                        Row(
+                                          children: [
+                                            IconButton(
+                                              icon: Icon(
+                                                isPlayingThis
+                                                    ? Icons.pause_circle_filled
+                                                    : Icons.play_circle_fill,
+                                                color: isPlayingThis
+                                                    ? pal.danger
+                                                    : pal.textPrimary,
+                                                size: 32,
+                                              ),
+                                              onPressed: () =>
+                                                  _togglePlayAudio(path),
+                                            ),
+                                            Expanded(
+                                              child: Text(
+                                                record['name'] ?? 'تسجيل صوتي',
+                                                style: TextStyle(
+                                                  color: pal.textPrimary,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                            ),
+                                            IconButton(
+                                              icon: Icon(
+                                                Icons.edit,
+                                                color: pal.textMuted,
+                                                size: 19,
+                                              ),
+                                              onPressed: () =>
+                                                  _renameAudio(index),
+                                            ),
+                                            IconButton(
+                                              icon: Icon(
+                                                Icons.close,
+                                                color: pal.danger,
+                                                size: 19,
+                                              ),
+                                              onPressed: () {
+                                                if (isPlayingThis) {
+                                                  _audioPlayer.stop();
+                                                }
+                                                setState(() {
+                                                  if (isPlayingThis) {
+                                                    _currentlyPlayingPath =
+                                                        null;
+                                                  }
+                                                  _audioRecords.removeAt(index);
+                                                });
+                                              },
+                                            ),
+                                          ],
+                                        ),
+                                        if (isPlayingThis &&
+                                            _playDuration.inMilliseconds > 0)
+                                          Slider(
+                                            value: _playPosition.inMilliseconds
+                                                .clamp(
+                                                  0,
+                                                  _playDuration.inMilliseconds,
+                                                )
+                                                .toDouble(),
+                                            max: _playDuration.inMilliseconds
+                                                .toDouble(),
+                                            activeColor: pal.accent,
+                                            onChanged: (v) => _audioPlayer.seek(
+                                              Duration(milliseconds: v.toInt()),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  );
+                                }),
+
+                              if (_showChecklistInput || _checklist.isNotEmpty)
+                                Onyx3DGlassCard(
+                                  margin: const EdgeInsets.only(bottom: 12),
+                                  padding: const EdgeInsets.all(14),
+                                  borderRadius: 18,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.spaceBetween,
                                         children: [
                                           Text(
-                                            activeLang.displayName,
+                                            'قائمة المهام ($doneCount/${_checklist.length})',
                                             style: TextStyle(
                                               color: pal.textPrimary,
                                               fontWeight: FontWeight.bold,
                                               fontSize: 13.5,
                                             ),
                                           ),
-                                          const SizedBox(width: 4),
-                                          Icon(
-                                            Icons.arrow_drop_down,
-                                            color: pal.textSecondary,
-                                            size: 18,
-                                          ),
-                                          const SizedBox(width: 6),
-                                          Text(
-                                            '· $linesCount سطر',
-                                            style: TextStyle(
-                                              color: pal.textMuted,
-                                              fontSize: 12,
-                                            ),
+                                          Row(
+                                            children: [
+                                              if (doneCount > 0)
+                                                GestureDetector(
+                                                  onTap: () => setState(() {
+                                                    _checklist.removeWhere(
+                                                      (c) => c['done'] == true,
+                                                    );
+                                                  }),
+                                                  child: Padding(
+                                                    padding:
+                                                        const EdgeInsets.only(
+                                                      left: 10,
+                                                    ),
+                                                    child: Text(
+                                                      'حذف المكتمل',
+                                                      style: TextStyle(
+                                                        color: pal.danger,
+                                                        fontSize: 11.5,
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              if (_checklist.isNotEmpty)
+                                                Text(
+                                                  '${((doneCount / _checklist.length) * 100).round()}%',
+                                                  style: TextStyle(
+                                                    color: pal.textSecondary,
+                                                    fontSize: 12,
+                                                    fontWeight: FontWeight.bold,
+                                                  ),
+                                                ),
+                                            ],
                                           ),
                                         ],
                                       ),
-                                    ),
-                                  ),
-                                  IconButton(
-                                    visualDensity: VisualDensity.compact,
-                                    tooltip: 'نسخ الكود',
-                                    icon: Icon(
-                                      Icons.copy_all,
-                                      size: 18,
-                                      color: pal.textPrimary,
-                                    ),
-                                    onPressed: () {
-                                      Clipboard.setData(
-                                        ClipboardData(
-                                          text: _contentController.text,
-                                        ),
-                                      );
-                                      ScaffoldMessenger.of(context)
-                                          .showSnackBar(
-                                        const SnackBar(
-                                          content: Text('تم نسخ الكود بنجاح'),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                  IconButton(
-                                    visualDensity: VisualDensity.compact,
-                                    tooltip: 'إيقاف عرض الكود',
-                                    icon: Icon(
-                                      Icons.close,
-                                      size: 18,
-                                      color: pal.textMuted,
-                                    ),
-                                    onPressed: () {
-                                      setState(() {
-                                        _codeMode = 'off';
-                                        _refreshCodeDetection();
-                                      });
-                                    },
-                                  ),
-                                ],
-                              ),
-                            ),
-
-                          if (_isRecording)
-                            Onyx3DGlassCard(
-                              margin: const EdgeInsets.only(bottom: 14),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                                vertical: 12,
-                              ),
-                              borderRadius: 18,
-                              isHighlighted: true,
-                              enableShimmer: true,
-                              child: Row(
-                                children: [
-                                  const Icon(
-                                    Icons.mic,
-                                    color: Colors.red,
-                                    size: 26,
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          'جاري التسجيل... ${_formatSeconds(_recordSeconds)}',
-                                          style: const TextStyle(
-                                            color: Colors.redAccent,
-                                            fontWeight: FontWeight.bold,
-                                            fontSize: 15,
-                                          ),
-                                        ),
+                                      if (_checklist.isNotEmpty) ...[
                                         const SizedBox(height: 6),
-                                        _RecordingWaveBars(
-                                          seed: _recordSeconds,
+                                        LinearProgressIndicator(
+                                          value: doneCount / _checklist.length,
+                                          backgroundColor: pal.chipBg,
+                                          color: pal.accent,
+                                          minHeight: 4,
                                         ),
                                       ],
-                                    ),
-                                  ),
-                                  ElevatedButton.icon(
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.red,
-                                      foregroundColor: Colors.white,
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                    ),
-                                    onPressed: _toggleRecording,
-                                    icon: const Icon(Icons.stop, size: 18),
-                                    label: const Text('إيقاف'),
-                                  ),
-                                ],
-                              ),
-                            ),
-
-                          Onyx3DGlassCard(
-                            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-                            borderRadius: 24,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                TextField(
-                                  controller: _titleController,
-                                  readOnly: _isReadingMode,
-                                  style: titleStyle,
-                                  onChanged: (_) => setState(() {}),
-                                  decoration: InputDecoration(
-                                    hintText: 'عنوان الملاحظة...',
-                                    hintStyle: TextStyle(color: pal.textMuted),
-                                    border: InputBorder.none,
-                                  ),
-                                ),
-                                Divider(color: pal.divider),
-                                Wrap(
-                                  spacing: 6,
-                                  runSpacing: 6,
-                                  crossAxisAlignment: WrapCrossAlignment.center,
-                                  children: [
-                                    ..._tags.map(
-                                      (tag) => Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 10,
-                                          vertical: 4,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: pal.chipBg,
-                                          borderRadius:
-                                              BorderRadius.circular(99),
-                                          border: Border.all(
-                                            color: pal.glassBorder,
-                                          ),
-                                        ),
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
+                                      const SizedBox(height: 8),
+                                      ...List.generate(_checklist.length, (i) {
+                                        final item = _checklist[i];
+                                        final bool done = item['done'] == true;
+                                        return Row(
                                           children: [
-                                            Text(
-                                              '#$tag',
-                                              style: TextStyle(
-                                                color: pal.textSecondary,
-                                                fontSize: 12,
+                                            Checkbox(
+                                              value: done,
+                                              activeColor: pal.accent,
+                                              checkColor: pal.onAccent,
+                                              onChanged: (v) => setState(
+                                                () => _checklist[i]['done'] =
+                                                    v ?? false,
                                               ),
                                             ),
-                                            const SizedBox(width: 4),
-                                            GestureDetector(
-                                              onTap: () => setState(
-                                                () => _tags.remove(tag),
+                                            Expanded(
+                                              child: Text(
+                                                item['text']?.toString() ?? '',
+                                                style: TextStyle(
+                                                  color: done
+                                                      ? pal.textMuted
+                                                      : pal.textPrimary,
+                                                  decoration: done
+                                                      ? TextDecoration
+                                                          .lineThrough
+                                                      : null,
+                                                ),
                                               ),
-                                              child: Icon(
+                                            ),
+                                            IconButton(
+                                              icon: Icon(
                                                 Icons.close,
-                                                size: 13,
+                                                size: 16,
                                                 color: pal.textMuted,
+                                              ),
+                                              onPressed: () => setState(
+                                                () => _checklist.removeAt(i),
                                               ),
                                             ),
                                           ],
-                                        ),
-                                      ),
-                                    ),
-                                    if (!_isReadingMode)
-                                      SizedBox(
-                                        width: 135,
-                                        child: TextField(
-                                          controller: _tagController,
-                                          style: TextStyle(
-                                            color: pal.textPrimary,
-                                            fontSize: 12.5,
-                                          ),
-                                          decoration: InputDecoration(
-                                            isDense: true,
-                                            hintText: '+ أضف وسماً...',
-                                            hintStyle: TextStyle(
-                                              color: pal.textMuted,
-                                              fontSize: 12,
-                                            ),
-                                            border: InputBorder.none,
-                                          ),
-                                          onSubmitted: (val) {
-                                            final clean =
-                                                val.trim().replaceAll('#', '');
-                                            if (clean.isNotEmpty &&
-                                                !_tags.contains(clean)) {
-                                              setState(() => _tags.add(clean));
-                                            }
-                                            _tagController.clear();
-                                          },
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-
-                          if (_imagePaths.isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 12),
-                              child: SizedBox(
-                                height: 108,
-                                child: ListView.builder(
-                                  scrollDirection: Axis.horizontal,
-                                  itemCount: _imagePaths.length,
-                                  itemBuilder: (context, index) {
-                                    final imgFile = File(_imagePaths[index]);
-                                    return Stack(
-                                      children: [
-                                        GestureDetector(
-                                          onTap: () => _viewGallery(index),
-                                          child: Container(
-                                            margin:
-                                                const EdgeInsets.only(left: 10),
-                                            width: 108,
-                                            decoration: BoxDecoration(
-                                              borderRadius:
-                                                  BorderRadius.circular(16),
-                                              border: Border.all(
-                                                color: pal.glassBorder,
-                                              ),
-                                              color: pal.chipBg,
-                                            ),
-                                            child: ClipRRect(
-                                              borderRadius:
-                                                  BorderRadius.circular(15),
-                                              child: imgFile.existsSync()
-                                                  ? Image.file(
-                                                      imgFile,
-                                                      fit: BoxFit.cover,
-                                                    )
-                                                  : Icon(
-                                                      Icons
-                                                          .broken_image_outlined,
-                                                      color: pal.textMuted,
-                                                    ),
-                                            ),
-                                          ),
-                                        ),
-                                        Positioned(
-                                          top: 4,
-                                          right: 4,
-                                          child: GestureDetector(
-                                            onTap: () => setState(
-                                              () =>
-                                                  _imagePaths.removeAt(index),
-                                            ),
-                                            child: Container(
-                                              padding: const EdgeInsets.all(3),
-                                              decoration: const BoxDecoration(
-                                                color: Colors.black87,
-                                                shape: BoxShape.circle,
-                                              ),
-                                              child: const Icon(
-                                                Icons.close,
-                                                color: Colors.white,
-                                                size: 15,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    );
-                                  },
-                                ),
-                              ),
-                            ),
-
-                          if (_audioRecords.isNotEmpty)
-                            ...List.generate(_audioRecords.length, (index) {
-                              final record = _audioRecords[index];
-                              final path = record['path'] ?? '';
-                              final bool isPlayingThis =
-                                  _currentlyPlayingPath == path;
-
-                              return Onyx3DGlassCard(
-                                margin: const EdgeInsets.only(bottom: 10),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 6,
-                                ),
-                                borderRadius: 16,
-                                child: Column(
-                                  children: [
-                                    Row(
-                                      children: [
-                                        IconButton(
-                                          icon: Icon(
-                                            isPlayingThis
-                                                ? Icons.pause_circle_filled
-                                                : Icons.play_circle_fill,
-                                            color: isPlayingThis
-                                                ? pal.danger
-                                                : pal.textPrimary,
-                                            size: 32,
-                                          ),
-                                          onPressed: () =>
-                                              _togglePlayAudio(path),
-                                        ),
-                                        Expanded(
-                                          child: Text(
-                                            record['name'] ?? 'تسجيل صوتي',
-                                            style: TextStyle(
-                                              color: pal.textPrimary,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                        ),
-                                        IconButton(
-                                          icon: Icon(
-                                            Icons.edit,
-                                            color: pal.textMuted,
-                                            size: 19,
-                                          ),
-                                          onPressed: () => _renameAudio(index),
-                                        ),
-                                        IconButton(
-                                          icon: Icon(
-                                            Icons.close,
-                                            color: pal.danger,
-                                            size: 19,
-                                          ),
-                                          onPressed: () {
-                                            if (isPlayingThis) {
-                                              _audioPlayer.stop();
-                                            }
-                                            setState(() {
-                                              if (isPlayingThis) {
-                                                _currentlyPlayingPath = null;
-                                              }
-                                              _audioRecords.removeAt(index);
-                                            });
-                                          },
-                                        ),
-                                      ],
-                                    ),
-                                    if (isPlayingThis &&
-                                        _playDuration.inMilliseconds > 0)
-                                      Slider(
-                                        value: _playPosition.inMilliseconds
-                                            .clamp(
-                                              0,
-                                              _playDuration.inMilliseconds,
-                                            )
-                                            .toDouble(),
-                                        max: _playDuration.inMilliseconds
-                                            .toDouble(),
-                                        activeColor: pal.accent,
-                                        onChanged: (v) => _audioPlayer.seek(
-                                          Duration(milliseconds: v.toInt()),
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              );
-                            }),
-
-                          if (_showChecklistInput || _checklist.isNotEmpty)
-                            Onyx3DGlassCard(
-                              margin: const EdgeInsets.only(bottom: 12),
-                              padding: const EdgeInsets.all(14),
-                              borderRadius: 18,
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Text(
-                                        'قائمة المهام ($doneCount/${_checklist.length})',
-                                        style: TextStyle(
-                                          color: pal.textPrimary,
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 13.5,
-                                        ),
-                                      ),
+                                        );
+                                      }),
                                       Row(
                                         children: [
-                                          if (doneCount > 0)
-                                            GestureDetector(
-                                              onTap: () => setState(() {
-                                                _checklist.removeWhere(
-                                                  (c) => c['done'] == true,
-                                                );
-                                              }),
-                                              child: Padding(
-                                                padding: const EdgeInsets.only(
-                                                  left: 10,
-                                                ),
-                                                child: Text(
-                                                  'حذف المكتمل',
-                                                  style: TextStyle(
-                                                    color: pal.danger,
-                                                    fontSize: 11.5,
-                                                    fontWeight: FontWeight.w600,
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
-                                          if (_checklist.isNotEmpty)
-                                            Text(
-                                              '${((doneCount / _checklist.length) * 100).round()}%',
+                                          Expanded(
+                                            child: TextField(
+                                              controller: _todoController,
                                               style: TextStyle(
-                                                color: pal.textSecondary,
-                                                fontSize: 12,
-                                                fontWeight: FontWeight.bold,
+                                                color: pal.textPrimary,
+                                                fontSize: 13.5,
                                               ),
+                                              decoration: InputDecoration(
+                                                isDense: true,
+                                                hintText:
+                                                    '+ أضف مهمة جديدة...',
+                                                hintStyle: TextStyle(
+                                                  color: pal.textMuted,
+                                                ),
+                                                border: InputBorder.none,
+                                              ),
+                                              onSubmitted: (val) {
+                                                if (val.trim().isEmpty) return;
+                                                setState(() {
+                                                  _checklist.add({
+                                                    'text': val.trim(),
+                                                    'done': false,
+                                                  });
+                                                });
+                                                _todoController.clear();
+                                              },
                                             ),
+                                          ),
+                                          IconButton(
+                                            icon: Icon(
+                                              Icons.add_circle_outline,
+                                              color: pal.textPrimary,
+                                              size: 20,
+                                            ),
+                                            onPressed: () {
+                                              final val =
+                                                  _todoController.text.trim();
+                                              if (val.isEmpty) return;
+                                              setState(() {
+                                                _checklist.add({
+                                                  'text': val,
+                                                  'done': false,
+                                                });
+                                              });
+                                              _todoController.clear();
+                                            },
+                                          ),
                                         ],
                                       ),
                                     ],
                                   ),
-                                  if (_checklist.isNotEmpty) ...[
-                                    const SizedBox(height: 6),
-                                    LinearProgressIndicator(
-                                      value: doneCount / _checklist.length,
-                                      backgroundColor: pal.chipBg,
-                                      color: pal.accent,
-                                      minHeight: 4,
+                                ),
+
+                              if (_isCodeActive)
+                                _buildCodeEditorArea(pal)
+                              else if (_isReadingMode)
+                                _buildReadableNoteArea(pal, contentStyle)
+                              else
+                                Onyx3DGlassCard(
+                                  key: _editorAreaKey,
+                                  padding: const EdgeInsets.all(16),
+                                  borderRadius: 24,
+                                  child: ConstrainedBox(
+                                    constraints:
+                                        const BoxConstraints(minHeight: 220),
+                                    child: TextField(
+                                      controller: _contentController,
+                                      scrollController:
+                                          _contentScrollController,
+                                      maxLines: null,
+                                      style: contentStyle,
+                                      onChanged: _onContentChanged,
+                                      decoration: InputDecoration(
+                                        hintText:
+                                            'اكتب ملاحظتك هنا أو الصق أي رابط فيديو / تواصل أو كود برمجي...',
+                                        hintMaxLines: 2,
+                                        hintStyle:
+                                            TextStyle(color: pal.textMuted),
+                                        border: InputBorder.none,
+                                      ),
                                     ),
-                                  ],
-                                  const SizedBox(height: 8),
-                                  ...List.generate(_checklist.length, (i) {
-                                    final item = _checklist[i];
-                                    final bool done = item['done'] == true;
-                                    return Row(
-                                      children: [
-                                        Checkbox(
-                                          value: done,
-                                          activeColor: pal.accent,
-                                          checkColor: pal.onAccent,
-                                          onChanged: (v) => setState(
-                                            () => _checklist[i]['done'] =
-                                                v ?? false,
-                                          ),
-                                        ),
-                                        Expanded(
-                                          child: Text(
-                                            item['text']?.toString() ?? '',
-                                            style: TextStyle(
-                                              color: done
-                                                  ? pal.textMuted
-                                                  : pal.textPrimary,
-                                              decoration: done
-                                                  ? TextDecoration.lineThrough
-                                                  : null,
-                                            ),
-                                          ),
-                                        ),
-                                        IconButton(
-                                          icon: Icon(
-                                            Icons.close,
-                                            size: 16,
-                                            color: pal.textMuted,
-                                          ),
-                                          onPressed: () => setState(
-                                            () => _checklist.removeAt(i),
-                                          ),
-                                        ),
-                                      ],
-                                    );
-                                  }),
+                                  ),
+                                ),
+
+                              _buildDetectedLinksSection(pal, detectedLinks),
+
+                              const SizedBox(height: 10),
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    '$words كلمة · $linesCount سطر · ${_contentController.text.length} حرف',
+                                    style: TextStyle(
+                                      color: pal.textMuted,
+                                      fontSize: 12,
+                                    ),
+                                  ),
                                   Row(
                                     children: [
-                                      Expanded(
-                                        child: TextField(
-                                          controller: _todoController,
+                                      TextButton(
+                                        onPressed: () =>
+                                            _insertTextAtCursor('\n• '),
+                                        child: Text(
+                                          '• نقطة',
                                           style: TextStyle(
-                                            color: pal.textPrimary,
-                                            fontSize: 13.5,
+                                            color: pal.textSecondary,
+                                            fontSize: 12,
                                           ),
-                                          decoration: InputDecoration(
-                                            isDense: true,
-                                            hintText: '+ أضف مهمة جديدة...',
-                                            hintStyle:
-                                                TextStyle(color: pal.textMuted),
-                                            border: InputBorder.none,
-                                          ),
-                                          onSubmitted: (val) {
-                                            if (val.trim().isEmpty) return;
-                                            setState(() {
-                                              _checklist.add({
-                                                'text': val.trim(),
-                                                'done': false,
-                                              });
-                                            });
-                                            _todoController.clear();
-                                          },
                                         ),
                                       ),
-                                      IconButton(
-                                        icon: Icon(
-                                          Icons.add_circle_outline,
-                                          color: pal.textPrimary,
-                                          size: 20,
+                                      TextButton(
+                                        onPressed: () => _insertTextAtCursor(
+                                          '\n──────────\n',
                                         ),
-                                        onPressed: () {
-                                          final val =
-                                              _todoController.text.trim();
-                                          if (val.isEmpty) return;
-                                          setState(() {
-                                            _checklist.add({
-                                              'text': val,
-                                              'done': false,
-                                            });
-                                          });
-                                          _todoController.clear();
-                                        },
+                                        child: Text(
+                                          '— فاصل',
+                                          style: TextStyle(
+                                            color: pal.textSecondary,
+                                            fontSize: 12,
+                                          ),
+                                        ),
                                       ),
                                     ],
-                                  ),
-                                ],
-                              ),
-                            ),
-
-                          if (_isCodeActive)
-                            _buildCodeEditorArea(pal)
-                          else if (_isReadingMode)
-                            _buildReadableNoteArea(pal, contentStyle)
-                          else
-                            Onyx3DGlassCard(
-                              padding: const EdgeInsets.all(16),
-                              borderRadius: 24,
-                              child: ConstrainedBox(
-                                constraints:
-                                    const BoxConstraints(minHeight: 220),
-                                child: TextField(
-                                  controller: _contentController,
-                                  scrollController: _contentScrollController,
-                                  maxLines: null,
-                                  style: contentStyle,
-                                  onChanged: _onContentChanged,
-                                  decoration: InputDecoration(
-                                    hintText:
-                                        'اكتب ملاحظتك هنا أو الصق أي رابط فيديو / تواصل أو كود برمجي...',
-                                    hintMaxLines: 2,
-                                    hintStyle: TextStyle(color: pal.textMuted),
-                                    border: InputBorder.none,
-                                  ),
-                                ),
-                              ),
-                            ),
-
-                          _buildDetectedLinksSection(pal, detectedLinks),
-
-                          const SizedBox(height: 10),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(
-                                '$words كلمة · $linesCount سطر · ${_contentController.text.length} حرف',
-                                style: TextStyle(
-                                  color: pal.textMuted,
-                                  fontSize: 12,
-                                ),
-                              ),
-                              Row(
-                                children: [
-                                  TextButton(
-                                    onPressed: () =>
-                                        _insertTextAtCursor('\n• '),
-                                    child: Text(
-                                      '• نقطة',
-                                      style: TextStyle(
-                                        color: pal.textSecondary,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ),
-                                  TextButton(
-                                    onPressed: () =>
-                                        _insertTextAtCursor('\n──────────\n'),
-                                    child: Text(
-                                      '— فاصل',
-                                      style: TextStyle(
-                                        color: pal.textSecondary,
-                                        fontSize: 12,
-                                      ),
-                                    ),
                                   ),
                                 ],
                               ),
                             ],
                           ),
-                        ],
-                      ),
+                        ),
+
+                        // شريط التمرير السريع الاحترافي (مع مؤشرات البحث وفقاعة السطر)
+                        _LuxuryFastScroller(
+                          controller: _outerScrollController,
+                          palette: pal,
+                          isCodeActive: _isCodeActive,
+                          totalLines: linesCount,
+                          matchFractions: _computeMatchFractions(),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -2553,6 +3186,274 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                 ),
               ),
             ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// راسم أرقام الأسطر فائق السرعة — يرسم فقط الأسطر الظاهرة على الشاشة بلا أي التفاف
+class _ViewportLineNumbersPainter extends CustomPainter {
+  final int lineCount;
+  final double lineHeight;
+  final int activeLine;
+  final TextStyle style;
+  final TextScaler textScaler;
+  final Color normalColor;
+  final Color activeColor;
+  final GlobalKey editorAreaKey;
+  final double screenHeight;
+
+  const _ViewportLineNumbersPainter({
+    required this.lineCount,
+    required this.lineHeight,
+    required this.activeLine,
+    required this.style,
+    required this.textScaler,
+    required this.normalColor,
+    required this.activeColor,
+    required this.editorAreaKey,
+    required this.screenHeight,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (lineCount <= 0 || lineHeight <= 0) return;
+
+    int firstLine = 0;
+    int lastLine = math.min(lineCount - 1, 70);
+
+    final box = editorAreaKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box != null && box.hasSize) {
+      final double cardTopOnScreen = box.localToGlobal(Offset.zero).dy;
+      final double gutterTopOnScreen = cardTopOnScreen + 46.0;
+      final double visStartY = math.max(0.0, -gutterTopOnScreen - 80.0);
+      final double visEndY =
+          math.min(size.height, screenHeight - gutterTopOnScreen + 80.0);
+
+      firstLine = math.max(0, (visStartY / lineHeight).floor() - 1);
+      lastLine = math.min(lineCount - 1, (visEndY / lineHeight).ceil() + 1);
+    } else if (lineCount <= 120) {
+      lastLine = lineCount - 1;
+    }
+
+    for (int i = firstLine; i <= lastLine; i++) {
+      final bool isActive = i == activeLine;
+      final double y = 12.0 + (i * lineHeight);
+
+      if (isActive) {
+        canvas.drawRect(
+          Rect.fromLTWH(0, y, size.width, lineHeight),
+          Paint()..color = activeColor.withOpacity(0.10),
+        );
+      }
+
+      final tp = TextPainter(
+        text: TextSpan(
+          text: '${i + 1}',
+          style: style.copyWith(
+            color: isActive ? activeColor : normalColor,
+            fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        textScaler: textScaler,
+      )..layout();
+
+      tp.paint(canvas, Offset(size.width - tp.width - 8.0, y));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ViewportLineNumbersPainter oldDelegate) => true;
+}
+
+/// شريط التمرير السريع الجانبي بفقاعة رقم السطر وعلامات نتائج البحث
+class _LuxuryFastScroller extends StatefulWidget {
+  final ScrollController controller;
+  final OnyxPalette palette;
+  final bool isCodeActive;
+  final int totalLines;
+  final List<double> matchFractions;
+
+  const _LuxuryFastScroller({
+    required this.controller,
+    required this.palette,
+    required this.isCodeActive,
+    required this.totalLines,
+    required this.matchFractions,
+  });
+
+  @override
+  State<_LuxuryFastScroller> createState() => _LuxuryFastScrollerState();
+}
+
+class _LuxuryFastScrollerState extends State<_LuxuryFastScroller> {
+  bool _dragging = false;
+  double _dragFraction = 0.0;
+
+  void _jumpToFraction(double fraction) {
+    if (!widget.controller.hasClients) return;
+    final maxExtent = widget.controller.position.maxScrollExtent;
+    if (maxExtent <= 0) return;
+    final clamped = fraction.clamp(0.0, 1.0);
+    widget.controller.jumpTo(clamped * maxExtent);
+    setState(() => _dragFraction = clamped);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.controller,
+      builder: (context, _) {
+        if (!widget.controller.hasClients) return const SizedBox.shrink();
+        final pos = widget.controller.position;
+        if (!pos.hasContentDimensions || pos.maxScrollExtent <= 40) {
+          return const SizedBox.shrink();
+        }
+
+        final double fraction = _dragging
+            ? _dragFraction
+            : (pos.pixels / pos.maxScrollExtent).clamp(0.0, 1.0);
+        final int currentLine =
+            (1 + (fraction * math.max(0, widget.totalLines - 1))).round();
+        final String hudLabel = widget.isCodeActive
+            ? 'سطر $currentLine / ${widget.totalLines}'
+            : '${(fraction * 100).round()}%';
+
+        return PositionedDirectional(
+          end: 2,
+          top: 8,
+          bottom: 8,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final double trackH = math.max(80.0, constraints.maxHeight);
+              const double thumbH = 48.0;
+              final double usableH = math.max(1.0, trackH - thumbH);
+              final double thumbTop = fraction * usableH;
+
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_dragging)
+                    Transform.translate(
+                      offset: Offset(
+                        0,
+                        (thumbTop + 4).clamp(0.0, math.max(0.0, trackH - 34)),
+                      ),
+                      child: Container(
+                        margin: const EdgeInsets.only(left: 6, right: 6),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 11,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: widget.palette.accent,
+                          borderRadius: BorderRadius.circular(12),
+                          boxShadow: [
+                            BoxShadow(
+                              color: widget.palette.shadowDeep,
+                              blurRadius: 12,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: Text(
+                          hudLabel,
+                          style: TextStyle(
+                            color: widget.palette.onAccent,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.bold,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                      ),
+                    ),
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onVerticalDragStart: (details) {
+                      setState(() => _dragging = true);
+                      _jumpToFraction(
+                        (details.localPosition.dy - thumbH / 2) / usableH,
+                      );
+                    },
+                    onVerticalDragUpdate: (details) {
+                      _jumpToFraction(
+                        (details.localPosition.dy - thumbH / 2) / usableH,
+                      );
+                    },
+                    onVerticalDragEnd: (_) =>
+                        setState(() => _dragging = false),
+                    onTapDown: (details) {
+                      _jumpToFraction(
+                        (details.localPosition.dy - thumbH / 2) / usableH,
+                      );
+                    },
+                    child: SizedBox(
+                      width: 24,
+                      height: trackH,
+                      child: Stack(
+                        alignment: Alignment.topCenter,
+                        children: [
+                          // مسار خفيف
+                          Container(
+                            width: 4,
+                            height: trackH,
+                            decoration: BoxDecoration(
+                              color: widget.palette.textMuted.withOpacity(0.12),
+                              borderRadius: BorderRadius.circular(99),
+                            ),
+                          ),
+                          // علامات نتائج البحث على الشريط
+                          ...widget.matchFractions.take(120).map(
+                                (mf) => Positioned(
+                                  top: mf * (trackH - 4),
+                                  child: Container(
+                                    width: 10,
+                                    height: 3,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFF59E0B),
+                                      borderRadius: BorderRadius.circular(2),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          // مقبض التمرير الزجاجي البارز
+                          Positioned(
+                            top: thumbTop,
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 90),
+                              width: _dragging ? 12 : 8,
+                              height: thumbH,
+                              decoration: BoxDecoration(
+                                color: _dragging
+                                    ? widget.palette.accent
+                                    : widget.palette.textSecondary
+                                        .withOpacity(0.65),
+                                borderRadius: BorderRadius.circular(99),
+                                border: Border.all(
+                                  color: widget.palette.glassHighlight,
+                                  width: 0.8,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: widget.palette.shadowDeep
+                                        .withOpacity(0.45),
+                                    blurRadius: 8,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
         );
       },
