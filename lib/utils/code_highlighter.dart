@@ -41,10 +41,12 @@ CodeLanguageInfo getLanguageById(String id) {
 
 class CodeDetector {
   static CodeLanguageInfo? detect(String raw) {
-    final text = raw.trim();
-    if (text.length < 10) return null;
+    final trimmed = raw.trim();
+    if (trimmed.length < 10) return null;
 
-    // إذا كان النص يحتوي على رابط واضح بدون بنية برمجية، لا تصنفه ككود
+    // تحليل أول 4000 حرف فقط لسرعة فائقة مع الأكواد الضخمة
+    final text = trimmed.length > 4000 ? trimmed.substring(0, 4000) : trimmed;
+
     final textWithoutLinks = text.replaceAll(LinkDetector.urlRegex, '').trim();
     if (textWithoutLinks.length < 8) return null;
 
@@ -57,8 +59,8 @@ class CodeDetector {
       return null;
     }
 
-    if ((text.startsWith('{') && text.endsWith('}')) ||
-        (text.startsWith('[') && text.endsWith(']'))) {
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+        (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
       if (RegExp(r'"[^"]+"\s*:').hasMatch(text)) {
         return getLanguageById('json');
       }
@@ -255,10 +257,27 @@ class CodeDetector {
   }
 }
 
+class _StyledSegment {
+  final int start;
+  final int end;
+  final TextStyle style;
+  const _StyledSegment(this.start, this.end, this.style);
+}
+
 class CodeSyntaxTextController extends TextEditingController {
   bool syntaxEnabled;
   bool isDarkTheme;
   String languageId;
+  List<TextRange> searchMatches = const [];
+  int activeMatchIndex = -1;
+
+  // ذاكرة تخزين مؤقت لتفادي إعادة تحليل الملفات الكبيرة عند التمرير
+  String? _cachedText;
+  bool? _cachedSyntax;
+  bool? _cachedIsDark;
+  String? _cachedLangId;
+  TextStyle? _cachedBaseStyle;
+  List<_StyledSegment>? _cachedSegments;
 
   CodeSyntaxTextController({
     super.text,
@@ -285,6 +304,257 @@ class CodeSyntaxTextController extends TextEditingController {
     'create', 'table', 'join', 'and', 'or', 'not',
   };
 
+  static bool _isDigit(int c) => c >= 48 && c <= 57;
+  static bool _isUpper(int c) => c >= 65 && c <= 90;
+  static bool _isLower(int c) => c >= 97 && c <= 122;
+  static bool _isIdentStart(int c) => _isUpper(c) || _isLower(c) || c == 95;
+  static bool _isIdentChar(int c) => _isIdentStart(c) || _isDigit(c);
+  static bool _isTagChar(int c) =>
+      _isIdentChar(c) || c == 58 || c == 45 || c == 47 || c == 33 || c == 63;
+  static bool _isNumChar(int c) =>
+      _isDigit(c) ||
+      c == 46 ||
+      c == 95 ||
+      c == 120 ||
+      c == 88 ||
+      (c >= 65 && c <= 70) ||
+      (c >= 97 && c <= 102);
+
+  static bool _isOperator(int c) {
+    switch (c) {
+      case 123: // {
+      case 125: // }
+      case 40: // (
+      case 41: // )
+      case 91: // [
+      case 93: // ]
+      case 61: // =
+      case 62: // >
+      case 60: // <
+      case 43: // +
+      case 45: // -
+      case 42: // *
+      case 47: // /
+      case 38: // &
+      case 124: // |
+      case 33: // !
+      case 58: // :
+      case 59: // ;
+      case 46: // .
+      case 44: // ,
+      case 63: // ?
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  List<_StyledSegment> _buildBaseSegments(String src, TextStyle base) {
+    if (_cachedSegments != null &&
+        _cachedText == src &&
+        _cachedSyntax == syntaxEnabled &&
+        _cachedIsDark == isDarkTheme &&
+        _cachedLangId == languageId &&
+        _cachedBaseStyle == base) {
+      return _cachedSegments!;
+    }
+
+    final List<_StyledSegment> segs = [];
+
+    if (!syntaxEnabled) {
+      final links = LinkDetector.extractLinks(src, unique: false);
+      if (links.isEmpty) {
+        segs.add(_StyledSegment(0, src.length, base));
+      } else {
+        final Color linkColor =
+            isDarkTheme ? const Color(0xFF7CC4FF) : const Color(0xFF1D4ED8);
+        final linkStyle = base.copyWith(
+          color: linkColor,
+          decoration: TextDecoration.underline,
+          decorationColor: linkColor,
+        );
+        int pos = 0;
+        for (final link in links) {
+          if (link.start > pos) {
+            segs.add(_StyledSegment(pos, link.start, base));
+          }
+          segs.add(_StyledSegment(link.start, link.end, linkStyle));
+          pos = link.end;
+        }
+        if (pos < src.length) {
+          segs.add(_StyledSegment(pos, src.length, base));
+        }
+      }
+    } else {
+      final TextStyle kwStyle = base.copyWith(
+        color: isDarkTheme ? const Color(0xFFC792EA) : const Color(0xFF7C3AED),
+        fontWeight: FontWeight.bold,
+      );
+      final TextStyle typeStyle = base.copyWith(
+        color: isDarkTheme ? const Color(0xFF82AAFF) : const Color(0xFF1D4ED8),
+      );
+      final TextStyle strStyle = base.copyWith(
+        color: isDarkTheme ? const Color(0xFFC3E88D) : const Color(0xFF15803D),
+      );
+      final TextStyle commentStyle = base.copyWith(
+        color: isDarkTheme ? const Color(0xFF737B8C) : const Color(0xFF6B7280),
+        fontStyle: FontStyle.italic,
+      );
+      final TextStyle numStyle = base.copyWith(
+        color: isDarkTheme ? const Color(0xFFF78C6C) : const Color(0xFFC2410C),
+      );
+      final TextStyle tagStyle = base.copyWith(
+        color: isDarkTheme ? const Color(0xFFFFCB6B) : const Color(0xFFB45309),
+        fontWeight: FontWeight.w600,
+      );
+      final TextStyle opStyle = base.copyWith(
+        color: isDarkTheme ? const Color(0xFF89DDFF) : const Color(0xFF0369A1),
+      );
+
+      final int len = src.length;
+      final bool hashCommentLang =
+          languageId == 'python' || languageId == 'yaml' || languageId == 'bash';
+      final bool tagLang = languageId == 'html' || languageId == 'xml';
+      int i = 0;
+
+      while (i < len) {
+        final int c = src.codeUnitAt(i);
+
+        // 1. تعليقات السطر الواحد // أو -- أو #
+        if ((c == 47 && i + 1 < len && src.codeUnitAt(i + 1) == 47) ||
+            (c == 45 &&
+                i + 1 < len &&
+                src.codeUnitAt(i + 1) == 45 &&
+                languageId == 'sql') ||
+            (c == 35 && hashCommentLang)) {
+          final int nl = src.indexOf('\n', i);
+          final int end = nl == -1 ? len : nl;
+          segs.add(_StyledSegment(i, end, commentStyle));
+          i = end;
+          continue;
+        }
+
+        // 2. تعليقات متعددة الأسطر /* ... */
+        if (c == 47 && i + 1 < len && src.codeUnitAt(i + 1) == 42) {
+          final int close = src.indexOf('*/', i + 2);
+          final int end = close == -1 ? len : close + 2;
+          segs.add(_StyledSegment(i, end, commentStyle));
+          i = end;
+          continue;
+        }
+
+        // 3. النصوص " ' `
+        if (c == 34 || c == 39 || c == 96) {
+          int j = i + 1;
+          while (j < len) {
+            final int cj = src.codeUnitAt(j);
+            if (cj == 92 && j + 1 < len) {
+              j += 2;
+              continue;
+            }
+            if (cj == c) {
+              j++;
+              break;
+            }
+            if (cj == 10) break;
+            j++;
+          }
+          segs.add(_StyledSegment(i, j, strStyle));
+          i = j;
+          continue;
+        }
+
+        // 4. @ أو #include
+        if (c == 64 || (c == 35 && !hashCommentLang)) {
+          int j = i + 1;
+          while (j < len && _isIdentChar(src.codeUnitAt(j))) {
+            j++;
+          }
+          segs.add(_StyledSegment(i, j, tagStyle));
+          i = j;
+          continue;
+        }
+
+        // 5. وسوم HTML/XML
+        if (c == 60 && tagLang && i + 1 < len) {
+          final int next = src.codeUnitAt(i + 1);
+          if (_isUpper(next) || _isLower(next) || next == 47 || next == 33 || next == 63) {
+            int j = i + 1;
+            while (j < len && _isTagChar(src.codeUnitAt(j))) {
+              j++;
+            }
+            segs.add(_StyledSegment(i, j, tagStyle));
+            i = j;
+            continue;
+          }
+        }
+
+        // 6. الأرقام
+        if (_isDigit(c)) {
+          int j = i + 1;
+          while (j < len && _isNumChar(src.codeUnitAt(j))) {
+            j++;
+          }
+          segs.add(_StyledSegment(i, j, numStyle));
+          i = j;
+          continue;
+        }
+
+        // 7. الكلمات المفتاحية والأنواع
+        if (_isIdentStart(c)) {
+          int j = i + 1;
+          while (j < len && _isIdentChar(src.codeUnitAt(j))) {
+            j++;
+          }
+          final word = src.substring(i, j);
+          if (_keywords.contains(word)) {
+            segs.add(_StyledSegment(i, j, kwStyle));
+          } else if (_isUpper(c)) {
+            segs.add(_StyledSegment(i, j, typeStyle));
+          } else {
+            segs.add(_StyledSegment(i, j, base));
+          }
+          i = j;
+          continue;
+        }
+
+        // 8. الأقواس والعمليات
+        if (_isOperator(c)) {
+          segs.add(_StyledSegment(i, i + 1, opStyle));
+          i++;
+          continue;
+        }
+
+        // 9. بقية المحارف المتجاورة دفعة واحدة
+        int j = i + 1;
+        while (j < len) {
+          final int cj = src.codeUnitAt(j);
+          if (_isIdentStart(cj) ||
+              _isDigit(cj) ||
+              _isOperator(cj) ||
+              cj == 34 ||
+              cj == 39 ||
+              cj == 96 ||
+              cj == 64 ||
+              cj == 35) {
+            break;
+          }
+          j++;
+        }
+        segs.add(_StyledSegment(i, j, base));
+        i = j;
+      }
+    }
+
+    _cachedText = src;
+    _cachedSyntax = syntaxEnabled;
+    _cachedIsDark = isDarkTheme;
+    _cachedLangId = languageId;
+    _cachedBaseStyle = base;
+    _cachedSegments = segs;
+    return segs;
+  }
+
   @override
   TextSpan buildTextSpan({
     required BuildContext context,
@@ -300,215 +570,76 @@ class CodeSyntaxTextController extends TextEditingController {
     }
 
     final base = style ?? const TextStyle(fontSize: 14);
-
-    // في النص العادي: نميّز الروابط بلون سماوي واضح مع تسطير
-    if (!syntaxEnabled) {
-      final links = LinkDetector.extractLinks(text, unique: false);
-      if (links.isEmpty) {
-        return super.buildTextSpan(
-          context: context,
-          style: style,
-          withComposing: withComposing,
-        );
-      }
-
-      final Color linkColor =
-          isDarkTheme ? const Color(0xFF7CC4FF) : const Color(0xFF1D4ED8);
-      final List<InlineSpan> spans = [];
-      int pos = 0;
-
-      for (final link in links) {
-        if (link.start > pos) {
-          spans.add(TextSpan(text: text.substring(pos, link.start), style: base));
-        }
-        spans.add(
-          TextSpan(
-            text: text.substring(link.start, link.end),
-            style: base.copyWith(
-              color: linkColor,
-              decoration: TextDecoration.underline,
-              decorationColor: linkColor,
-            ),
-          ),
-        );
-        pos = link.end;
-      }
-      if (pos < text.length) {
-        spans.add(TextSpan(text: text.substring(pos), style: base));
-      }
-      return TextSpan(style: base, children: spans);
+    if (!syntaxEnabled &&
+        searchMatches.isEmpty &&
+        LinkDetector.extractLinks(text, unique: false).isEmpty) {
+      return super.buildTextSpan(
+        context: context,
+        style: style,
+        withComposing: withComposing,
+      );
     }
 
-    final Color kwColor =
-        isDarkTheme ? const Color(0xFFC792EA) : const Color(0xFF7C3AED);
-    final Color typeColor =
-        isDarkTheme ? const Color(0xFF82AAFF) : const Color(0xFF1D4ED8);
-    final Color strColor =
-        isDarkTheme ? const Color(0xFFC3E88D) : const Color(0xFF15803D);
-    final Color commentColor =
-        isDarkTheme ? const Color(0xFF737B8C) : const Color(0xFF6B7280);
-    final Color numColor =
-        isDarkTheme ? const Color(0xFFF78C6C) : const Color(0xFFC2410C);
-    final Color tagColor =
-        isDarkTheme ? const Color(0xFFFFCB6B) : const Color(0xFFB45309);
-    final Color opColor =
-        isDarkTheme ? const Color(0xFF89DDFF) : const Color(0xFF0369A1);
+    final segments = _buildBaseSegments(text, base);
+    if (searchMatches.isEmpty) {
+      return TextSpan(
+        style: base,
+        children: segments
+            .map((s) => TextSpan(text: text.substring(s.start, s.end), style: s.style))
+            .toList(),
+      );
+    }
+
+    // تظليل جميع نتائج البحث + تمييز النتيجة الحالية بلون ذهبي بارز
+    final Color otherBg =
+        isDarkTheme ? const Color(0x55FBBF24) : const Color(0x55F59E0B);
+    final Color activeBg = const Color(0xFFF59E0B);
 
     final List<InlineSpan> spans = [];
-    final int len = text.length;
-    int i = 0;
+    int matchPtr = 0;
 
-    final bool hashCommentLang =
-        languageId == 'python' || languageId == 'yaml' || languageId == 'bash';
-
-    void addSpan(int start, int end, TextStyle spanStyle) {
-      if (end <= start) return;
-      final sub = text.substring(start, end);
-      if (withComposing &&
-          value.composing.isValid &&
-          !value.composing.isCollapsed &&
-          start < value.composing.end &&
-          end > value.composing.start) {
-        spans.add(
-          TextSpan(
-            text: sub,
-            style: spanStyle.copyWith(decoration: TextDecoration.underline),
-          ),
-        );
-      } else {
-        spans.add(TextSpan(text: sub, style: spanStyle));
-      }
-    }
-
-    while (i < len) {
-      final String ch = text[i];
-
-      if ((ch == '/' && i + 1 < len && text[i + 1] == '/') ||
-          (ch == '-' &&
-              i + 1 < len &&
-              text[i + 1] == '-' &&
-              languageId == 'sql') ||
-          (ch == '#' && hashCommentLang)) {
-        final int nl = text.indexOf('\n', i);
-        final int end = nl == -1 ? len : nl;
-        addSpan(
-          i,
-          end,
-          base.copyWith(color: commentColor, fontStyle: FontStyle.italic),
-        );
-        i = end;
-        continue;
+    for (final seg in segments) {
+      int pos = seg.start;
+      while (matchPtr < searchMatches.length &&
+          searchMatches[matchPtr].end <= pos) {
+        matchPtr++;
       }
 
-      if (ch == '/' && i + 1 < len && text[i + 1] == '*') {
-        final int close = text.indexOf('*/', i + 2);
-        final int end = close == -1 ? len : close + 2;
-        addSpan(
-          i,
-          end,
-          base.copyWith(color: commentColor, fontStyle: FontStyle.italic),
-        );
-        i = end;
-        continue;
-      }
+      int ptr = matchPtr;
+      while (ptr < searchMatches.length && searchMatches[ptr].start < seg.end) {
+        final m = searchMatches[ptr];
+        final int ovStart = m.start > pos ? m.start : pos;
+        final int ovEnd = m.end < seg.end ? m.end : seg.end;
 
-      if (ch == '"' || ch == "'" || ch == '`') {
-        int j = i + 1;
-        while (j < len) {
-          if (text[j] == '\\' && j + 1 < len) {
-            j += 2;
-            continue;
-          }
-          if (text[j] == ch) {
-            j++;
-            break;
-          }
-          if (text[j] == '\n') break;
-          j++;
-        }
-        addSpan(i, j, base.copyWith(color: strColor));
-        i = j;
-        continue;
-      }
-
-      if (ch == '@' || (ch == '#' && !hashCommentLang)) {
-        int j = i + 1;
-        while (j < len && RegExp(r'[a-zA-Z0-9_]').hasMatch(text[j])) {
-          j++;
-        }
-        addSpan(
-          i,
-          j,
-          base.copyWith(color: tagColor, fontWeight: FontWeight.w600),
-        );
-        i = j;
-        continue;
-      }
-
-      if (ch == '<' &&
-          (languageId == 'html' || languageId == 'xml') &&
-          i + 1 < len &&
-          RegExp(r'[a-zA-Z/!?]').hasMatch(text[i + 1])) {
-        int j = i + 1;
-        while (j < len && RegExp(r'[a-zA-Z0-9_:!?/-]').hasMatch(text[j])) {
-          j++;
-        }
-        addSpan(
-          i,
-          j,
-          base.copyWith(color: tagColor, fontWeight: FontWeight.w600),
-        );
-        i = j;
-        continue;
-      }
-
-      if (RegExp(r'[0-9]').hasMatch(ch)) {
-        int j = i + 1;
-        while (j < len && RegExp(r'[0-9.xXa-fA-F_]').hasMatch(text[j])) {
-          j++;
-        }
-        addSpan(i, j, base.copyWith(color: numColor));
-        i = j;
-        continue;
-      }
-
-      if (RegExp(r'[a-zA-Z_]').hasMatch(ch)) {
-        int j = i + 1;
-        while (j < len && RegExp(r'[a-zA-Z0-9_]').hasMatch(text[j])) {
-          j++;
-        }
-        final word = text.substring(i, j);
-        if (_keywords.contains(word)) {
-          addSpan(
-            i,
-            j,
-            base.copyWith(color: kwColor, fontWeight: FontWeight.bold),
+        if (ovStart > pos) {
+          spans.add(
+            TextSpan(text: text.substring(pos, ovStart), style: seg.style),
           );
-        } else if (word.isNotEmpty &&
-            word[0].toUpperCase() == word[0] &&
-            word[0] != '_') {
-          addSpan(i, j, base.copyWith(color: typeColor));
-        } else {
-          addSpan(i, j, base);
         }
-        i = j;
-        continue;
+        if (ovEnd > ovStart) {
+          final bool isActive = ptr == activeMatchIndex;
+          spans.add(
+            TextSpan(
+              text: text.substring(ovStart, ovEnd),
+              style: seg.style.copyWith(
+                backgroundColor: isActive ? activeBg : otherBg,
+                color: isActive ? Colors.black : seg.style.color,
+                fontWeight: isActive ? FontWeight.bold : seg.style.fontWeight,
+              ),
+            ),
+          );
+          pos = ovEnd;
+        }
+        if (m.end <= seg.end) {
+          ptr++;
+        } else {
+          break;
+        }
       }
 
-      if (RegExp(r'[{}()\[\]=><+\-*/&|!:;.,?]').hasMatch(ch)) {
-        addSpan(i, i + 1, base.copyWith(color: opColor));
-        i++;
-        continue;
+      if (pos < seg.end) {
+        spans.add(TextSpan(text: text.substring(pos, seg.end), style: seg.style));
       }
-
-      int j = i + 1;
-      while (j < len &&
-          !RegExp(r'''[a-zA-Z0-9_"'`@#/<>{}()\[\]=+\-*&|!:;.,?-]''')
-              .hasMatch(text[j])) {
-        j++;
-      }
-      addSpan(i, j, base);
-      i = j;
     }
 
     return TextSpan(style: base, children: spans);
