@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -28,9 +29,11 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isSearching = false;
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
+  Timer? _searchDebounce;
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -580,7 +583,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 .where((e) => e.value is Map && e.value['isTrashed'] == true)
                 .length;
 
-            final q = _searchQuery.trim().toLowerCase();
+            final q = _searchQuery.trim();
+            final RegExp? searchRegex = q.isEmpty
+                ? null
+                : RegExp(RegExp.escape(q), caseSensitive: false);
+
             final filteredNotes = allNotes.where((entry) {
               if (entry.value is! Map) return false;
               final note = entry.value as Map;
@@ -594,13 +601,6 @@ class _HomeScreenState extends State<HomeScreen> {
               final isLocked = (note['isLocked'] as bool?) ?? false;
               final maskContent = isLocked && OnyxSettings.hideLocked;
 
-              final bool matchesSearch = q.isEmpty ||
-                  title.toLowerCase().contains(q) ||
-                  category.toLowerCase().contains(q) ||
-                  (!maskContent &&
-                      tags.any((t) => t.toLowerCase().contains(q))) ||
-                  (!maskContent && content.toLowerCase().contains(q));
-
               bool matchesTab = false;
               if (_currentIndex == 4) {
                 matchesTab = isTrashed;
@@ -612,12 +612,18 @@ class _HomeScreenState extends State<HomeScreen> {
                   matchesTab = isFavorite && !isArchived;
                 }
               }
+              if (!matchesTab) return false;
 
               final bool matchesCategory = _currentIndex == 4 ||
                   _selectedCategory == 'الكل' ||
                   category == _selectedCategory;
+              if (!matchesCategory) return false;
 
-              return matchesSearch && matchesTab && matchesCategory;
+              if (searchRegex == null) return true;
+              return searchRegex.hasMatch(title) ||
+                  searchRegex.hasMatch(category) ||
+                  (!maskContent && tags.any((t) => searchRegex.hasMatch(t))) ||
+                  (!maskContent && searchRegex.hasMatch(content));
             }).toList();
 
             final sortMode = OnyxSettings.sortMode;
@@ -639,9 +645,7 @@ class _HomeScreenState extends State<HomeScreen> {
               return timeB.compareTo(timeA);
             });
 
-            // إظهار أزرار البحث والعرض والإفراغ بذكاء عند وجود محتوى فقط
-            final bool showTrashActions =
-                _currentIndex == 4 && trashCount > 0;
+            final bool showTrashActions = _currentIndex == 4 && trashCount > 0;
             final bool showListTools = _currentIndex != 3 &&
                 (_currentIndex != 4 || trashCount > 0) &&
                 (filteredNotes.isNotEmpty || _isSearching);
@@ -672,7 +676,15 @@ class _HomeScreenState extends State<HomeScreen> {
                               TextStyle(color: pal.textMuted, fontSize: 14),
                           border: InputBorder.none,
                         ),
-                        onChanged: (val) => setState(() => _searchQuery = val),
+                        onChanged: (val) {
+                          _searchDebounce?.cancel();
+                          _searchDebounce = Timer(
+                            const Duration(milliseconds: 120),
+                            () {
+                              if (mounted) setState(() => _searchQuery = val);
+                            },
+                          );
+                        },
                       )
                     : Text(
                         _getTitleByIndex(_currentIndex),
@@ -703,6 +715,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       tooltip: 'بحث',
                       icon: Icon(_isSearching ? Icons.close : Icons.search),
                       onPressed: () {
+                        _searchDebounce?.cancel();
                         setState(() {
                           if (_isSearching) {
                             _isSearching = false;
@@ -793,6 +806,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                               const SizedBox(height: 14),
                                               TextButton(
                                                 onPressed: () {
+                                                  _searchDebounce?.cancel();
                                                   setState(() {
                                                     _isSearching = false;
                                                     _searchQuery = '';
@@ -930,12 +944,15 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _navItem(int idx, IconData icon, String label, OnyxPalette pal) {
     final bool active = _currentIndex == idx;
     return GestureDetector(
-      onTap: () => setState(() {
-        _currentIndex = idx;
-        _isSearching = false;
-        _searchQuery = '';
-        _searchController.clear();
-      }),
+      onTap: () {
+        _searchDebounce?.cancel();
+        setState(() {
+          _currentIndex = idx;
+          _isSearching = false;
+          _searchQuery = '';
+          _searchController.clear();
+        });
+      },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 220),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -1010,16 +1027,21 @@ class _HomeScreenState extends State<HomeScreen> {
     final List<dynamic> tags = note['tags'] ?? [];
 
     final String rawContent = (note['content'] ?? '').toString();
+    // اقتصاص المعاينة لأول 420 حرف فقط لضمان سلاسة التمرير حتى مع الأكواد ذات آلاف الأسطر
+    final String previewText = rawContent.length > 420
+        ? '${rawContent.substring(0, 420)}...'
+        : rawContent;
+
     final String codeMode = (note['codeMode'] as String?) ?? 'auto';
     final String savedLang = (note['codeLanguage'] as String?) ?? '';
     final CodeLanguageInfo? codeLang = codeMode == 'off'
         ? null
         : (savedLang.isNotEmpty
             ? getLanguageById(savedLang)
-            : CodeDetector.detect(rawContent));
+            : CodeDetector.detect(previewText));
 
     final List<DetectedLink> links =
-        maskLocked ? const [] : LinkDetector.extractLinks(rawContent);
+        maskLocked ? const [] : LinkDetector.extractLinks(previewText);
 
     final TextStyle titleStyle = applyArabicFont(
       fontFam,
@@ -1218,7 +1240,7 @@ class _HomeScreenState extends State<HomeScreen> {
             )
           else
             Text(
-              rawContent,
+              previewText,
               style: codeLang != null
                   ? TextStyle(
                       fontFamily: 'monospace',
