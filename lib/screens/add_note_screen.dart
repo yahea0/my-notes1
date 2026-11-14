@@ -44,7 +44,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   final GlobalKey _editorAreaKey = GlobalKey();
   final List<TapGestureRecognizer> _linkRecognizers = [];
 
-  // البحث والاستبدال
   final TextEditingController _findController = TextEditingController();
   final TextEditingController _replaceController = TextEditingController();
   final FocusNode _findFocusNode = FocusNode();
@@ -55,7 +54,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   List<TextRange> _searchMatches = [];
   int _activeMatchIndex = -1;
 
-  // مقاييس مخبأة (Cached) لعدم إعادة حساب آلاف الأسطر في كل إطار
   List<int> _lineStarts = [0];
   int _longestLineIndex = 0;
   int _cachedWords = 0;
@@ -86,7 +84,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   String _lastCommittedText = '';
   bool _applyingHistory = false;
 
-  // حفظ القيم الابتدائية للمقارنة السريعة عند الخروج بدون نسخ النصوص الضخمة
   late final String _initTitle;
   late final String _initContent;
   late final String _initCategory;
@@ -240,7 +237,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     super.dispose();
   }
 
-  // ==================== حساب سريع للمقاييس في خطوة واحدة O(N) ====================
   void _rebuildFastMetrics(String text) {
     final int len = text.length;
     final List<int> starts = [0];
@@ -281,7 +277,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   }
 
   void _refreshLinksImmediate(String text) {
-    // في الأكواد الضخمة نفحص أول 16000 حرف فقط لتفادي تجميد الواجهة
     final sample = text.length > 16000 ? text.substring(0, 16000) : text;
     _cachedLinks = LinkDetector.extractLinks(sample);
   }
@@ -306,10 +301,12 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       final pos = _outerScrollController.position;
       if (pos.maxScrollExtent <= 0) return;
       final double frac =
-          ((pos.pixels + pos.viewportDimension * 0.4) / (pos.maxScrollExtent + pos.viewportDimension))
+          ((pos.pixels + pos.viewportDimension * 0.4) /
+                  (pos.maxScrollExtent + pos.viewportDimension))
               .clamp(0.0, 1.0);
-      final int estLine =
-          (frac * math.max(0, _lineStarts.length - 1)).round().clamp(0, _lineStarts.length - 1);
+      final int estLine = (frac * math.max(0, _lineStarts.length - 1))
+          .round()
+          .clamp(0, _lineStarts.length - 1);
       final int centerChar = _lineStarts[estLine];
       _ensureHighlightWindowContains(centerChar, notify: true);
     });
@@ -410,7 +407,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     _lastCommittedText = prev;
     _contentController.value = TextEditingValue(
       text: prev,
-      selection: TextSelection.collapsed(offset: math.min(prev.length, prev.length)),
+      selection: TextSelection.collapsed(offset: prev.length),
     );
     _applyingHistory = false;
     _rebuildFastMetrics(prev);
@@ -444,7 +441,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     }
   }
 
-  // ==================== محرك البحث والاستبدال الاحترافي ====================
   void _toggleFindBar({bool focusInput = true}) {
     setState(() {
       _showFindBar = !_showFindBar;
@@ -625,7 +621,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
 
     final currentText = _contentController.text;
     final replacement = _replaceController.text;
-    final String haystack = _caseSensitive ? currentText : currentText.toLowerCase();
+    final String haystack =
+        _caseSensitive ? currentText : currentText.toLowerCase();
     final String needle = _caseSensitive ? rawQuery : rawQuery.toLowerCase();
 
     final StringBuffer buf = StringBuffer();
@@ -677,7 +674,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   }
 
   void _jumpToLineNumber(int lineNum) {
-    final int safeIdx = (lineNum - 1).clamp(0, math.max(0, _lineStarts.length - 1));
+    final int safeIdx =
+        (lineNum - 1).clamp(0, math.max(0, _lineStarts.length - 1));
     final int offset = _lineStarts[safeIdx];
     _ensureHighlightWindowContains(offset, notify: true);
     _scrollToTextOffset(offset);
@@ -1887,6 +1885,32 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     return '$m:$s';
   }
 
+  Widget _topActionBtn({
+    required String tooltip,
+    required IconData icon,
+    required Color color,
+    required VoidCallback? onTap,
+    double size = 20,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: onTap,
+          child: SizedBox(
+            width: 36,
+            height: 36,
+            child: Center(
+              child: Icon(icon, size: size, color: color),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildFindAndReplaceBar(OnyxPalette pal) {
     final int? lineJumpTarget = _parseLineJumpQuery(_findController.text);
     final int total = _searchMatches.length;
@@ -2339,7 +2363,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       activeLine = _lineIndexOfOffset(_contentController.selection.start);
     }
 
-    // استخدام حاوية زجاجية خفيفة بدون BackdropFilter فوق حاوية ضخمة لضمان 60fps
     return Container(
       key: _editorAreaKey,
       decoration: BoxDecoration(
@@ -2552,103 +2575,104 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
           child: Scaffold(
             backgroundColor: pal.scaffoldBg,
             resizeToAvoidBottomInset: true,
-            appBar: AppBar(
-              backgroundColor: Colors.transparent,
-              leadingWidth: 46,
-              titleSpacing: 0,
-              title: const SizedBox.shrink(),
-              iconTheme: IconThemeData(color: pal.textPrimary),
-              leading: IconButton(
-                icon: const Icon(Icons.arrow_back),
-                onPressed: _handleBackPressed,
+            appBar: PreferredSize(
+              preferredSize: const Size.fromHeight(kToolbarHeight),
+              child: SafeArea(
+                bottom: false,
+                child: SizedBox(
+                  height: kToolbarHeight,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    child: Row(
+                      children: [
+                        _topActionBtn(
+                          tooltip: 'رجوع',
+                          icon: Icons.arrow_back,
+                          color: pal.textPrimary,
+                          size: 22,
+                          onTap: _handleBackPressed,
+                        ),
+                        const SizedBox(width: 24),
+                        Expanded(
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              _topActionBtn(
+                                tooltip: 'البحث والاستبدال',
+                                icon: _showFindBar
+                                    ? Icons.search_off
+                                    : Icons.search,
+                                color: _showFindBar
+                                    ? pal.accent
+                                    : pal.textPrimary,
+                                onTap: _toggleFindBar,
+                              ),
+                              _topActionBtn(
+                                tooltip: _isReadingMode
+                                    ? 'وضع التحرير'
+                                    : 'وضع القراءة والروابط',
+                                icon: _isReadingMode
+                                    ? Icons.edit_outlined
+                                    : Icons.visibility_outlined,
+                                color: pal.textPrimary,
+                                onTap: () => setState(
+                                  () => _isReadingMode = !_isReadingMode,
+                                ),
+                              ),
+                              _topActionBtn(
+                                tooltip: 'تراجع',
+                                icon: Icons.undo,
+                                color: _undoStack.isEmpty
+                                    ? pal.textMuted
+                                    : pal.textPrimary,
+                                onTap: _undoStack.isEmpty ? null : _undo,
+                              ),
+                              _topActionBtn(
+                                tooltip: 'إعادة',
+                                icon: Icons.redo,
+                                color: _redoStack.isEmpty
+                                    ? pal.textMuted
+                                    : pal.textPrimary,
+                                onTap: _redoStack.isEmpty ? null : _redo,
+                              ),
+                              _topActionBtn(
+                                tooltip: _isLocked ? 'مقفلة' : 'قفل الملاحظة',
+                                icon: _isLocked
+                                    ? Icons.lock
+                                    : Icons.lock_open_outlined,
+                                color: _isLocked
+                                    ? pal.textPrimary
+                                    : pal.textMuted,
+                                size: 19,
+                                onTap: () =>
+                                    setState(() => _isLocked = !_isLocked),
+                              ),
+                              _topActionBtn(
+                                tooltip: 'تثبيت',
+                                icon: _isPinned
+                                    ? Icons.push_pin
+                                    : Icons.push_pin_outlined,
+                                color:
+                                    _isPinned ? Colors.amber : pal.textPrimary,
+                                size: 19,
+                                onTap: () =>
+                                    setState(() => _isPinned = !_isPinned),
+                              ),
+                              _topActionBtn(
+                                tooltip: 'حفظ',
+                                icon: Icons.check,
+                                color: pal.textPrimary,
+                                size: 22,
+                                onTap: _saveNote,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
-              actions: [
-                IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 36),
-                  padding: EdgeInsets.zero,
-                  tooltip: 'البحث والاستبدال',
-                  icon: Icon(
-                    _showFindBar ? Icons.search_off : Icons.search,
-                    size: 20,
-                    color: _showFindBar ? pal.accent : pal.textPrimary,
-                  ),
-                  onPressed: _toggleFindBar,
-                ),
-                IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 36),
-                  padding: EdgeInsets.zero,
-                  tooltip:
-                      _isReadingMode ? 'وضع التحرير' : 'وضع القراءة والروابط',
-                  icon: Icon(
-                    _isReadingMode
-                        ? Icons.edit_outlined
-                        : Icons.visibility_outlined,
-                    size: 20,
-                    color: pal.textPrimary,
-                  ),
-                  onPressed: () =>
-                      setState(() => _isReadingMode = !_isReadingMode),
-                ),
-                IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 36),
-                  padding: EdgeInsets.zero,
-                  tooltip: 'تراجع',
-                  icon: Icon(
-                    Icons.undo,
-                    size: 20,
-                    color: _undoStack.isEmpty ? pal.textMuted : pal.textPrimary,
-                  ),
-                  onPressed: _undoStack.isEmpty ? null : _undo,
-                ),
-                IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 36),
-                  padding: EdgeInsets.zero,
-                  tooltip: 'إعادة',
-                  icon: Icon(
-                    Icons.redo,
-                    size: 20,
-                    color: _redoStack.isEmpty ? pal.textMuted : pal.textPrimary,
-                  ),
-                  onPressed: _redoStack.isEmpty ? null : _redo,
-                ),
-                IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 36),
-                  padding: EdgeInsets.zero,
-                  tooltip: _isLocked ? 'مقفلة' : 'قفل الملاحظة',
-                  icon: Icon(
-                    _isLocked ? Icons.lock : Icons.lock_open_outlined,
-                    size: 19,
-                    color: _isLocked ? pal.textPrimary : pal.textMuted,
-                  ),
-                  onPressed: () => setState(() => _isLocked = !_isLocked),
-                ),
-                IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 36, minHeight: 36),
-                  padding: EdgeInsets.zero,
-                  tooltip: 'تثبيت',
-                  icon: Icon(
-                    _isPinned ? Icons.push_pin : Icons.push_pin_outlined,
-                    size: 19,
-                    color: _isPinned ? Colors.amber : pal.textPrimary,
-                  ),
-                  onPressed: () => setState(() => _isPinned = !_isPinned),
-                ),
-                IconButton(
-                  constraints:
-                      const BoxConstraints(minWidth: 40, minHeight: 40),
-                  padding: EdgeInsets.zero,
-                  tooltip: 'حفظ',
-                  icon: Icon(Icons.check, color: pal.textPrimary),
-                  onPressed: _saveNote,
-                ),
-                const SizedBox(width: 4),
-              ],
             ),
             body: OnyxBackdrop(
               palette: pal,
