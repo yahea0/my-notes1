@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'link_detector.dart';
 
@@ -44,8 +45,8 @@ class CodeDetector {
     final trimmed = raw.trim();
     if (trimmed.length < 10) return null;
 
-    // تحليل أول 4000 حرف فقط لسرعة فائقة مع الأكواد الضخمة
-    final text = trimmed.length > 4000 ? trimmed.substring(0, 4000) : trimmed;
+    // تحليل أول 3500 حرف فقط للتعرف الفوري حتى على الملفات الضخمة
+    final text = trimmed.length > 3500 ? trimmed.substring(0, 3500) : trimmed;
 
     final textWithoutLinks = text.replaceAll(LinkDetector.urlRegex, '').trim();
     if (textWithoutLinks.length < 8) return null;
@@ -258,10 +259,10 @@ class CodeDetector {
 }
 
 class _StyledSegment {
-  final int start;
-  final int end;
+  int start;
+  int end;
   final TextStyle style;
-  const _StyledSegment(this.start, this.end, this.style);
+  _StyledSegment(this.start, this.end, this.style);
 }
 
 class CodeSyntaxTextController extends TextEditingController {
@@ -271,12 +272,17 @@ class CodeSyntaxTextController extends TextEditingController {
   List<TextRange> searchMatches = const [];
   int activeMatchIndex = -1;
 
-  // ذاكرة تخزين مؤقت لتفادي إعادة تحليل الملفات الكبيرة عند التمرير
+  // نافذة التلوين المرئية للملفات الضخمة (> 24000 حرف)
+  int highlightWindowStart = 0;
+  int highlightWindowEnd = 16000;
+
   String? _cachedText;
   bool? _cachedSyntax;
   bool? _cachedIsDark;
   String? _cachedLangId;
   TextStyle? _cachedBaseStyle;
+  int? _cachedWinStart;
+  int? _cachedWinEnd;
   List<_StyledSegment>? _cachedSegments;
 
   CodeSyntaxTextController({
@@ -285,6 +291,16 @@ class CodeSyntaxTextController extends TextEditingController {
     this.isDarkTheme = true,
     this.languageId = 'dart',
   });
+
+  void updateHighlightWindow(int start, int end, {bool notify = true}) {
+    final len = text.length;
+    final s = start.clamp(0, len);
+    final e = end.clamp(s, len);
+    if (s == highlightWindowStart && e == highlightWindowEnd) return;
+    highlightWindowStart = s;
+    highlightWindowEnd = e;
+    if (notify) notifyListeners();
+  }
 
   static const Set<String> _keywords = {
     'abstract', 'as', 'assert', 'async', 'await', 'break', 'case', 'catch',
@@ -349,22 +365,44 @@ class CodeSyntaxTextController extends TextEditingController {
     }
   }
 
-  List<_StyledSegment> _buildBaseSegments(String src, TextStyle base) {
+  void _pushSeg(List<_StyledSegment> segs, int start, int end, TextStyle style) {
+    if (end <= start) return;
+    if (segs.isNotEmpty && segs.last.style == style && segs.last.end == start) {
+      segs.last.end = end;
+    } else {
+      segs.add(_StyledSegment(start, end, style));
+    }
+  }
+
+  List<_StyledSegment> _buildWindowedSegments(
+    String src,
+    TextStyle base,
+    int winStart,
+    int winEnd,
+  ) {
     if (_cachedSegments != null &&
         _cachedText == src &&
         _cachedSyntax == syntaxEnabled &&
         _cachedIsDark == isDarkTheme &&
         _cachedLangId == languageId &&
-        _cachedBaseStyle == base) {
+        _cachedBaseStyle == base &&
+        _cachedWinStart == winStart &&
+        _cachedWinEnd == winEnd) {
       return _cachedSegments!;
     }
 
     final List<_StyledSegment> segs = [];
 
+    if (winStart > 0) {
+      _pushSeg(segs, 0, winStart, base);
+    }
+
     if (!syntaxEnabled) {
-      final links = LinkDetector.extractLinks(src, unique: false);
+      // نفحص الروابط فقط في النصوص المعقولة أو داخل النافذة المرئية
+      final slice = src.substring(winStart, winEnd);
+      final links = LinkDetector.extractLinks(slice, unique: false);
       if (links.isEmpty) {
-        segs.add(_StyledSegment(0, src.length, base));
+        _pushSeg(segs, winStart, winEnd, base);
       } else {
         final Color linkColor =
             isDarkTheme ? const Color(0xFF7CC4FF) : const Color(0xFF1D4ED8);
@@ -376,13 +414,13 @@ class CodeSyntaxTextController extends TextEditingController {
         int pos = 0;
         for (final link in links) {
           if (link.start > pos) {
-            segs.add(_StyledSegment(pos, link.start, base));
+            _pushSeg(segs, winStart + pos, winStart + link.start, base);
           }
-          segs.add(_StyledSegment(link.start, link.end, linkStyle));
+          _pushSeg(segs, winStart + link.start, winStart + link.end, linkStyle);
           pos = link.end;
         }
-        if (pos < src.length) {
-          segs.add(_StyledSegment(pos, src.length, base));
+        if (pos < slice.length) {
+          _pushSeg(segs, winStart + pos, winEnd, base);
         }
       }
     } else {
@@ -411,34 +449,34 @@ class CodeSyntaxTextController extends TextEditingController {
         color: isDarkTheme ? const Color(0xFF89DDFF) : const Color(0xFF0369A1),
       );
 
-      final int len = src.length;
       final bool hashCommentLang =
           languageId == 'python' || languageId == 'yaml' || languageId == 'bash';
       final bool tagLang = languageId == 'html' || languageId == 'xml';
-      int i = 0;
+      int i = winStart;
 
-      while (i < len) {
+      while (i < winEnd) {
         final int c = src.codeUnitAt(i);
 
-        // 1. تعليقات السطر الواحد // أو -- أو #
-        if ((c == 47 && i + 1 < len && src.codeUnitAt(i + 1) == 47) ||
+        // 1. تعليقات السطر الواحد
+        if ((c == 47 && i + 1 < winEnd && src.codeUnitAt(i + 1) == 47) ||
             (c == 45 &&
-                i + 1 < len &&
+                i + 1 < winEnd &&
                 src.codeUnitAt(i + 1) == 45 &&
                 languageId == 'sql') ||
             (c == 35 && hashCommentLang)) {
           final int nl = src.indexOf('\n', i);
-          final int end = nl == -1 ? len : nl;
-          segs.add(_StyledSegment(i, end, commentStyle));
+          final int end = (nl == -1 || nl > winEnd) ? winEnd : nl;
+          _pushSeg(segs, i, end, commentStyle);
           i = end;
           continue;
         }
 
         // 2. تعليقات متعددة الأسطر /* ... */
-        if (c == 47 && i + 1 < len && src.codeUnitAt(i + 1) == 42) {
+        if (c == 47 && i + 1 < winEnd && src.codeUnitAt(i + 1) == 42) {
           final int close = src.indexOf('*/', i + 2);
-          final int end = close == -1 ? len : close + 2;
-          segs.add(_StyledSegment(i, end, commentStyle));
+          final int end =
+              (close == -1 || close + 2 > winEnd) ? winEnd : close + 2;
+          _pushSeg(segs, i, end, commentStyle);
           i = end;
           continue;
         }
@@ -446,9 +484,9 @@ class CodeSyntaxTextController extends TextEditingController {
         // 3. النصوص " ' `
         if (c == 34 || c == 39 || c == 96) {
           int j = i + 1;
-          while (j < len) {
+          while (j < winEnd) {
             final int cj = src.codeUnitAt(j);
-            if (cj == 92 && j + 1 < len) {
+            if (cj == 92 && j + 1 < winEnd) {
               j += 2;
               continue;
             }
@@ -459,7 +497,7 @@ class CodeSyntaxTextController extends TextEditingController {
             if (cj == 10) break;
             j++;
           }
-          segs.add(_StyledSegment(i, j, strStyle));
+          _pushSeg(segs, i, j, strStyle);
           i = j;
           continue;
         }
@@ -467,23 +505,27 @@ class CodeSyntaxTextController extends TextEditingController {
         // 4. @ أو #include
         if (c == 64 || (c == 35 && !hashCommentLang)) {
           int j = i + 1;
-          while (j < len && _isIdentChar(src.codeUnitAt(j))) {
+          while (j < winEnd && _isIdentChar(src.codeUnitAt(j))) {
             j++;
           }
-          segs.add(_StyledSegment(i, j, tagStyle));
+          _pushSeg(segs, i, j, tagStyle);
           i = j;
           continue;
         }
 
         // 5. وسوم HTML/XML
-        if (c == 60 && tagLang && i + 1 < len) {
+        if (c == 60 && tagLang && i + 1 < winEnd) {
           final int next = src.codeUnitAt(i + 1);
-          if (_isUpper(next) || _isLower(next) || next == 47 || next == 33 || next == 63) {
+          if (_isUpper(next) ||
+              _isLower(next) ||
+              next == 47 ||
+              next == 33 ||
+              next == 63) {
             int j = i + 1;
-            while (j < len && _isTagChar(src.codeUnitAt(j))) {
+            while (j < winEnd && _isTagChar(src.codeUnitAt(j))) {
               j++;
             }
-            segs.add(_StyledSegment(i, j, tagStyle));
+            _pushSeg(segs, i, j, tagStyle);
             i = j;
             continue;
           }
@@ -492,10 +534,10 @@ class CodeSyntaxTextController extends TextEditingController {
         // 6. الأرقام
         if (_isDigit(c)) {
           int j = i + 1;
-          while (j < len && _isNumChar(src.codeUnitAt(j))) {
+          while (j < winEnd && _isNumChar(src.codeUnitAt(j))) {
             j++;
           }
-          segs.add(_StyledSegment(i, j, numStyle));
+          _pushSeg(segs, i, j, numStyle);
           i = j;
           continue;
         }
@@ -503,16 +545,16 @@ class CodeSyntaxTextController extends TextEditingController {
         // 7. الكلمات المفتاحية والأنواع
         if (_isIdentStart(c)) {
           int j = i + 1;
-          while (j < len && _isIdentChar(src.codeUnitAt(j))) {
+          while (j < winEnd && _isIdentChar(src.codeUnitAt(j))) {
             j++;
           }
           final word = src.substring(i, j);
           if (_keywords.contains(word)) {
-            segs.add(_StyledSegment(i, j, kwStyle));
+            _pushSeg(segs, i, j, kwStyle);
           } else if (_isUpper(c)) {
-            segs.add(_StyledSegment(i, j, typeStyle));
+            _pushSeg(segs, i, j, typeStyle);
           } else {
-            segs.add(_StyledSegment(i, j, base));
+            _pushSeg(segs, i, j, base);
           }
           i = j;
           continue;
@@ -520,14 +562,14 @@ class CodeSyntaxTextController extends TextEditingController {
 
         // 8. الأقواس والعمليات
         if (_isOperator(c)) {
-          segs.add(_StyledSegment(i, i + 1, opStyle));
+          _pushSeg(segs, i, i + 1, opStyle);
           i++;
           continue;
         }
 
         // 9. بقية المحارف المتجاورة دفعة واحدة
         int j = i + 1;
-        while (j < len) {
+        while (j < winEnd) {
           final int cj = src.codeUnitAt(j);
           if (_isIdentStart(cj) ||
               _isDigit(cj) ||
@@ -541,9 +583,13 @@ class CodeSyntaxTextController extends TextEditingController {
           }
           j++;
         }
-        segs.add(_StyledSegment(i, j, base));
+        _pushSeg(segs, i, j, base);
         i = j;
       }
+    }
+
+    if (winEnd < src.length) {
+      _pushSeg(segs, winEnd, src.length, base);
     }
 
     _cachedText = src;
@@ -551,6 +597,8 @@ class CodeSyntaxTextController extends TextEditingController {
     _cachedIsDark = isDarkTheme;
     _cachedLangId = languageId;
     _cachedBaseStyle = base;
+    _cachedWinStart = winStart;
+    _cachedWinEnd = winEnd;
     _cachedSegments = segs;
     return segs;
   }
@@ -569,10 +617,28 @@ class CodeSyntaxTextController extends TextEditingController {
       );
     }
 
+    final int len = text.length;
     final base = style ?? const TextStyle(fontSize: 14);
-    if (!syntaxEnabled &&
-        searchMatches.isEmpty &&
-        LinkDetector.extractLinks(text, unique: false).isEmpty) {
+
+    // تحديد النافذة المرئية: كامل الملف إن كان <= 24000 حرف، أو النافذة النشطة للملفات الضخمة
+    int winStart = 0;
+    int winEnd = len;
+    if (len > 24000) {
+      int s = highlightWindowStart.clamp(0, len);
+      int e = highlightWindowEnd.clamp(s, len);
+      if (s > 0) {
+        final prevNl = text.lastIndexOf('\n', s);
+        s = prevNl == -1 ? 0 : prevNl + 1;
+      }
+      if (e < len) {
+        final nextNl = text.indexOf('\n', e);
+        e = nextNl == -1 ? len : nextNl;
+      }
+      winStart = s;
+      winEnd = math.max(s, e);
+    }
+
+    if (!syntaxEnabled && searchMatches.isEmpty && len > 24000) {
       return super.buildTextSpan(
         context: context,
         style: style,
@@ -580,25 +646,49 @@ class CodeSyntaxTextController extends TextEditingController {
       );
     }
 
-    final segments = _buildBaseSegments(text, base);
+    final segments = _buildWindowedSegments(text, base, winStart, winEnd);
     if (searchMatches.isEmpty) {
       return TextSpan(
         style: base,
         children: segments
-            .map((s) => TextSpan(text: text.substring(s.start, s.end), style: s.style))
+            .map(
+              (s) => TextSpan(text: text.substring(s.start, s.end), style: s.style),
+            )
             .toList(),
       );
     }
 
-    // تظليل جميع نتائج البحث + تمييز النتيجة الحالية بلون ذهبي بارز
+    // تظليل نتائج البحث الموجودة داخل النافذة المرئية فقط للملفات الكبيرة (للحفاظ على سرعة 60fps)
     final Color otherBg =
         isDarkTheme ? const Color(0x55FBBF24) : const Color(0x55F59E0B);
-    final Color activeBg = const Color(0xFFF59E0B);
+    const Color activeBg = Color(0xFFF59E0B);
 
     final List<InlineSpan> spans = [];
     int matchPtr = 0;
 
+    // تجاوز سريع للنتائج السابقة للنافذة إذا كان الملف كبيراً
+    if (len > 24000 && searchMatches.isNotEmpty) {
+      int lo = 0;
+      int hi = searchMatches.length - 1;
+      while (lo < hi) {
+        final mid = (lo + hi) >> 1;
+        if (searchMatches[mid].end <= winStart) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
+        }
+      }
+      matchPtr = lo;
+    }
+
     for (final seg in segments) {
+      if (len > 24000 && (seg.end <= winStart || seg.start >= winEnd)) {
+        spans.add(
+          TextSpan(text: text.substring(seg.start, seg.end), style: seg.style),
+        );
+        continue;
+      }
+
       int pos = seg.start;
       while (matchPtr < searchMatches.length &&
           searchMatches[matchPtr].end <= pos) {
