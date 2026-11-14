@@ -44,15 +44,25 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   final GlobalKey _editorAreaKey = GlobalKey();
   final List<TapGestureRecognizer> _linkRecognizers = [];
 
-  // شريط البحث والاستبدال الاحترافي
+  // البحث والاستبدال
   final TextEditingController _findController = TextEditingController();
   final TextEditingController _replaceController = TextEditingController();
   final FocusNode _findFocusNode = FocusNode();
   bool _showFindBar = false;
   bool _showReplaceRow = false;
   bool _caseSensitive = false;
+  bool _matchesCapped = false;
   List<TextRange> _searchMatches = [];
   int _activeMatchIndex = -1;
+
+  // مقاييس مخبأة (Cached) لعدم إعادة حساب آلاف الأسطر في كل إطار
+  List<int> _lineStarts = [0];
+  int _longestLineIndex = 0;
+  int _cachedWords = 0;
+  List<DetectedLink> _cachedLinks = const [];
+  Timer? _heavyAnalysisTimer;
+  Timer? _findDebounceTimer;
+  Timer? _scrollWindowTimer;
 
   String _selectedCategory = 'عام';
   int? _customTitleColor;
@@ -75,7 +85,23 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   final List<String> _redoStack = [];
   String _lastCommittedText = '';
   bool _applyingHistory = false;
-  late String _initialSignature;
+
+  // حفظ القيم الابتدائية للمقارنة السريعة عند الخروج بدون نسخ النصوص الضخمة
+  late final String _initTitle;
+  late final String _initContent;
+  late final String _initCategory;
+  late final int? _initTitleColor;
+  late final int? _initContentColor;
+  late final String _initFont;
+  late final double _initContentSize;
+  late final bool _initPinned;
+  late final bool _initLocked;
+  late final String _initCodeMode;
+  late final String _initLangId;
+  late final int _initImagesLen;
+  late final int _initAudiosLen;
+  late final int _initTagsLen;
+  late final int _initCheckLen;
 
   String _calcDisplay = '0';
   final List<String> _calcHistory = [];
@@ -142,8 +168,28 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       _titleFontSize = (_contentFontSize + 6.0).clamp(18.0, 38.0);
     }
 
+    _initTitle = _titleController.text;
+    _initContent = _contentController.text;
+    _initCategory = _selectedCategory;
+    _initTitleColor = _customTitleColor;
+    _initContentColor = _customContentColor;
+    _initFont = _fontFamily;
+    _initContentSize = _contentFontSize;
+    _initPinned = _isPinned;
+    _initLocked = _isLocked;
+    _initCodeMode = _codeMode;
+    _initLangId = _manualLangId;
+    _initImagesLen = _imagePaths.length;
+    _initAudiosLen = _audioRecords.length;
+    _initTagsLen = _tags.length;
+    _initCheckLen = _checklist.length;
+
+    _rebuildFastMetrics(initialContent);
+    _refreshLinksImmediate(initialContent);
     _refreshCodeDetection();
-    _initialSignature = _computeSignature();
+    _contentController.updateHighlightWindow(0, 16000, notify: false);
+
+    _outerScrollController.addListener(_onOuterScroll);
 
     _completeSub = _audioPlayer.onPlayerComplete.listen((_) {
       if (mounted) {
@@ -171,10 +217,14 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   @override
   void dispose() {
     _disposeLinkRecognizers();
+    _heavyAnalysisTimer?.cancel();
+    _findDebounceTimer?.cancel();
+    _scrollWindowTimer?.cancel();
     _recordTimer?.cancel();
     _completeSub?.cancel();
     _durationSub?.cancel();
     _positionSub?.cancel();
+    _outerScrollController.removeListener(_onOuterScroll);
     _audioPlayer.dispose();
     _audioRecorder.dispose();
     _titleController.dispose();
@@ -188,6 +238,109 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     _codeHorizScrollController.dispose();
     _contentScrollController.dispose();
     super.dispose();
+  }
+
+  // ==================== حساب سريع للمقاييس في خطوة واحدة O(N) ====================
+  void _rebuildFastMetrics(String text) {
+    final int len = text.length;
+    final List<int> starts = [0];
+    int longestIdx = 0;
+    int longestLen = 0;
+    int words = 0;
+    bool inWord = false;
+    int lineStart = 0;
+
+    for (int i = 0; i < len; i++) {
+      final int c = text.codeUnitAt(i);
+      if (c == 10) {
+        final lineLen = i - lineStart;
+        if (lineLen > longestLen) {
+          longestLen = lineLen;
+          longestIdx = starts.length - 1;
+        }
+        lineStart = i + 1;
+        starts.add(lineStart);
+        inWord = false;
+      } else if (c == 32 || c == 9 || c == 13) {
+        inWord = false;
+      } else {
+        if (!inWord) {
+          words++;
+          inWord = true;
+        }
+      }
+    }
+    final lastLineLen = len - lineStart;
+    if (lastLineLen > longestLen) {
+      longestIdx = starts.length - 1;
+    }
+
+    _lineStarts = starts;
+    _longestLineIndex = longestIdx;
+    _cachedWords = words;
+  }
+
+  void _refreshLinksImmediate(String text) {
+    // في الأكواد الضخمة نفحص أول 16000 حرف فقط لتفادي تجميد الواجهة
+    final sample = text.length > 16000 ? text.substring(0, 16000) : text;
+    _cachedLinks = LinkDetector.extractLinks(sample);
+  }
+
+  void _scheduleHeavyAnalysis(String text) {
+    _heavyAnalysisTimer?.cancel();
+    if (text.length <= 12000) {
+      _refreshLinksImmediate(text);
+      return;
+    }
+    _heavyAnalysisTimer = Timer(const Duration(milliseconds: 350), () {
+      if (!mounted) return;
+      setState(() => _refreshLinksImmediate(_contentController.text));
+    });
+  }
+
+  void _onOuterScroll() {
+    if (_contentController.text.length <= 24000) return;
+    _scrollWindowTimer?.cancel();
+    _scrollWindowTimer = Timer(const Duration(milliseconds: 90), () {
+      if (!mounted || !_outerScrollController.hasClients) return;
+      final pos = _outerScrollController.position;
+      if (pos.maxScrollExtent <= 0) return;
+      final double frac =
+          ((pos.pixels + pos.viewportDimension * 0.4) / (pos.maxScrollExtent + pos.viewportDimension))
+              .clamp(0.0, 1.0);
+      final int estLine =
+          (frac * math.max(0, _lineStarts.length - 1)).round().clamp(0, _lineStarts.length - 1);
+      final int centerChar = _lineStarts[estLine];
+      _ensureHighlightWindowContains(centerChar, notify: true);
+    });
+  }
+
+  void _ensureHighlightWindowContains(int centerChar, {bool notify = true}) {
+    final len = _contentController.text.length;
+    if (len <= 24000) return;
+    final int curS = _contentController.highlightWindowStart;
+    final int curE = _contentController.highlightWindowEnd;
+    if (centerChar >= curS + 1800 && centerChar <= curE - 1800) return;
+
+    final int newS = math.max(0, centerChar - 6500);
+    final int newE = math.min(len, centerChar + 6500);
+    _contentController.updateHighlightWindow(newS, newE, notify: notify);
+  }
+
+  int _lineIndexOfOffset(int offset) {
+    final int count = _lineStarts.length;
+    if (count <= 1) return 0;
+    int lo = 0;
+    int hi = count - 1;
+    while (lo <= hi) {
+      final mid = (lo + hi) >> 1;
+      if (_lineStarts[mid] <= offset) {
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return hi.clamp(0, count - 1);
   }
 
   bool get _isCodeActive {
@@ -221,11 +374,27 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   void _onContentChanged(String newVal) {
     if (!_applyingHistory && newVal != _lastCommittedText) {
       _undoStack.add(_lastCommittedText);
-      if (_undoStack.length > 40) _undoStack.removeAt(0);
+      final int maxUndo = newVal.length > 40000 ? 15 : 40;
+      while (_undoStack.length > maxUndo) {
+        _undoStack.removeAt(0);
+      }
       _redoStack.clear();
       _lastCommittedText = newVal;
     }
+
+    _rebuildFastMetrics(newVal);
     _refreshCodeDetection();
+    _scheduleHeavyAnalysis(newVal);
+
+    if (newVal.length > 24000 &&
+        _contentController.selection.isValid &&
+        _contentController.selection.start >= 0) {
+      _ensureHighlightWindowContains(
+        _contentController.selection.start,
+        notify: false,
+      );
+    }
+
     if (_showFindBar) {
       _recomputeSearchMatches(jumpToFirst: false);
     } else {
@@ -241,9 +410,11 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     _lastCommittedText = prev;
     _contentController.value = TextEditingValue(
       text: prev,
-      selection: TextSelection.collapsed(offset: prev.length),
+      selection: TextSelection.collapsed(offset: math.min(prev.length, prev.length)),
     );
     _applyingHistory = false;
+    _rebuildFastMetrics(prev);
+    _refreshLinksImmediate(prev);
     _refreshCodeDetection();
     if (_showFindBar) {
       _recomputeSearchMatches(jumpToFirst: false);
@@ -263,6 +434,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       selection: TextSelection.collapsed(offset: next.length),
     );
     _applyingHistory = false;
+    _rebuildFastMetrics(next);
+    _refreshLinksImmediate(next);
     _refreshCodeDetection();
     if (_showFindBar) {
       _recomputeSearchMatches(jumpToFirst: false);
@@ -277,6 +450,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       _showFindBar = !_showFindBar;
       if (!_showFindBar) {
         _searchMatches = [];
+        _matchesCapped = false;
         _activeMatchIndex = -1;
         _contentController.searchMatches = const [];
         _contentController.activeMatchIndex = -1;
@@ -289,6 +463,14 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
         (_) => _findFocusNode.requestFocus(),
       );
     }
+  }
+
+  void _onFindTextChanged(String _) {
+    _findDebounceTimer?.cancel();
+    final int delay = _contentController.text.length > 20000 ? 150 : 40;
+    _findDebounceTimer = Timer(Duration(milliseconds: delay), () {
+      if (mounted) _recomputeSearchMatches(jumpToFirst: true);
+    });
   }
 
   int? _parseLineJumpQuery(String q) {
@@ -312,6 +494,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     if (rawQuery.isEmpty) {
       setState(() {
         _searchMatches = [];
+        _matchesCapped = false;
         _activeMatchIndex = -1;
         _contentController.searchMatches = const [];
         _contentController.activeMatchIndex = -1;
@@ -323,6 +506,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     if (jumpLine != null) {
       setState(() {
         _searchMatches = [];
+        _matchesCapped = false;
         _activeMatchIndex = -1;
         _contentController.searchMatches = const [];
         _contentController.activeMatchIndex = -1;
@@ -336,12 +520,18 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     final String haystack = _caseSensitive ? text : text.toLowerCase();
     final String needle = _caseSensitive ? rawQuery : rawQuery.toLowerCase();
     final List<TextRange> found = [];
+    bool capped = false;
+    const int maxMatches = 2500;
 
     int start = 0;
     while (start <= haystack.length - needle.length) {
       final idx = haystack.indexOf(needle, start);
       if (idx == -1) break;
       found.add(TextRange(start: idx, end: idx + needle.length));
+      if (found.length >= maxMatches) {
+        capped = true;
+        break;
+      }
       start = idx + math.max(1, needle.length);
     }
 
@@ -355,8 +545,13 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       }
     }
 
+    if (nextIdx >= 0) {
+      _ensureHighlightWindowContains(found[nextIdx].start, notify: false);
+    }
+
     setState(() {
       _searchMatches = found;
+      _matchesCapped = capped;
       _activeMatchIndex = nextIdx;
       _contentController.searchMatches = found;
       _contentController.activeMatchIndex = nextIdx;
@@ -376,11 +571,15 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     if (_searchMatches.isEmpty) return;
     final int count = _searchMatches.length;
     final int target = (_activeMatchIndex + delta + count) % count;
+    final int targetOffset = _searchMatches[target].start;
+
+    _ensureHighlightWindowContains(targetOffset, notify: false);
+
     setState(() {
       _activeMatchIndex = target;
       _contentController.activeMatchIndex = target;
     });
-    _scrollToTextOffset(_searchMatches[target].start);
+    _scrollToTextOffset(targetOffset);
   }
 
   void _replaceCurrentMatch() {
@@ -396,18 +595,24 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
 
     final newText = currentText.replaceRange(range.start, range.end, replacement);
     _undoStack.add(_lastCommittedText);
-    if (_undoStack.length > 40) _undoStack.removeAt(0);
+    final int maxUndo = newText.length > 40000 ? 15 : 40;
+    while (_undoStack.length > maxUndo) {
+      _undoStack.removeAt(0);
+    }
     _redoStack.clear();
     _lastCommittedText = newText;
 
     _applyingHistory = true;
     _contentController.value = TextEditingValue(
       text: newText,
-      selection: TextSelection.collapsed(offset: range.start + replacement.length),
+      selection:
+          TextSelection.collapsed(offset: range.start + replacement.length),
     );
     _applyingHistory = false;
 
+    _rebuildFastMetrics(newText);
     _refreshCodeDetection();
+    _scheduleHeavyAnalysis(newText);
     _recomputeSearchMatches(
       jumpToFirst: true,
       keepOffsetNear: range.start + replacement.length,
@@ -415,25 +620,31 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   }
 
   void _replaceAllMatches() {
-    if (_searchMatches.isEmpty) {
+    final rawQuery = _findController.text;
+    if (rawQuery.isEmpty) return;
+
+    final currentText = _contentController.text;
+    final replacement = _replaceController.text;
+    final String haystack = _caseSensitive ? currentText : currentText.toLowerCase();
+    final String needle = _caseSensitive ? rawQuery : rawQuery.toLowerCase();
+
+    final StringBuffer buf = StringBuffer();
+    int pos = 0;
+    int replacedCount = 0;
+
+    while (pos <= haystack.length - needle.length) {
+      final idx = haystack.indexOf(needle, pos);
+      if (idx == -1) break;
+      if (idx > pos) buf.write(currentText.substring(pos, idx));
+      buf.write(replacement);
+      pos = idx + needle.length;
+      replacedCount++;
+    }
+    if (replacedCount == 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('لا توجد نتائج مطابقة للاستبدال')),
       );
       return;
-    }
-
-    final int replacedCount = _searchMatches.length;
-    final replacement = _replaceController.text;
-    final currentText = _contentController.text;
-
-    final StringBuffer buf = StringBuffer();
-    int pos = 0;
-    for (final range in _searchMatches) {
-      if (range.start > pos) {
-        buf.write(currentText.substring(pos, range.start));
-      }
-      buf.write(replacement);
-      pos = range.end;
     }
     if (pos < currentText.length) {
       buf.write(currentText.substring(pos));
@@ -441,7 +652,10 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
 
     final newText = buf.toString();
     _undoStack.add(_lastCommittedText);
-    if (_undoStack.length > 40) _undoStack.removeAt(0);
+    final int maxUndo = newText.length > 40000 ? 15 : 40;
+    while (_undoStack.length > maxUndo) {
+      _undoStack.removeAt(0);
+    }
     _redoStack.clear();
     _lastCommittedText = newText;
 
@@ -452,7 +666,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     );
     _applyingHistory = false;
 
+    _rebuildFastMetrics(newText);
     _refreshCodeDetection();
+    _scheduleHeavyAnalysis(newText);
     _recomputeSearchMatches(jumpToFirst: false);
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -461,12 +677,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   }
 
   void _jumpToLineNumber(int lineNum) {
-    final lines = _contentController.text.split('\n');
-    final int safeLine = lineNum.clamp(1, math.max(1, lines.length));
-    int offset = 0;
-    for (int i = 0; i < safeLine - 1; i++) {
-      offset += lines[i].length + 1;
-    }
+    final int safeIdx = (lineNum - 1).clamp(0, math.max(0, _lineStarts.length - 1));
+    final int offset = _lineStarts[safeIdx];
+    _ensureHighlightWindowContains(offset, notify: true);
     _scrollToTextOffset(offset);
   }
 
@@ -476,7 +689,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       final box = _editorAreaKey.currentContext?.findRenderObject() as RenderBox?;
       if (box == null || !_outerScrollController.hasClients) return;
 
-      final scrollCtx = _outerScrollController.position.context.notificationContext;
+      final scrollCtx =
+          _outerScrollController.position.context.notificationContext;
       final viewportBox = scrollCtx?.findRenderObject() as RenderBox?;
       final double dyInViewport = viewportBox != null
           ? box.localToGlobal(Offset.zero, ancestor: viewportBox).dy
@@ -487,10 +701,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       final safeOffset = charOffset.clamp(0, text.length);
 
       if (_isCodeActive) {
-        final before = text.substring(0, safeOffset);
-        final linesBefore = before.split('\n');
-        final int lineIdx = linesBefore.length - 1;
-        final String linePrefix = linesBefore.last;
+        final int lineIdx = _lineIndexOfOffset(safeOffset);
+        final int lineStart = _lineStarts[lineIdx];
+        final String linePrefix = text.substring(lineStart, safeOffset);
 
         final double codeFontSize = _contentFontSize.clamp(12.0, 20.0);
         final codeStyle = TextStyle(
@@ -505,16 +718,16 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
           forceStrutHeight: true,
         );
         final scaler = MediaQuery.textScalerOf(context);
-        final double lineH = _measureExactLineHeight(codeStyle, codeStrut, scaler);
+        final double lineH =
+            _measureExactLineHeight(codeStyle, codeStrut, scaler);
 
-        // +46px ارتفاع شريط الرموز السريعة فوق الكود
         final double targetY =
             (cardTopInScroll + 46.0 + (lineIdx * lineH) - (viewportH * 0.35))
                 .clamp(0.0, _outerScrollController.position.maxScrollExtent);
 
         _outerScrollController.animateTo(
           targetY,
-          duration: const Duration(milliseconds: 260),
+          duration: const Duration(milliseconds: 240),
           curve: Curves.easeOutCubic,
         );
 
@@ -530,7 +743,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
           );
           _codeHorizScrollController.animateTo(
             targetX,
-            duration: const Duration(milliseconds: 220),
+            duration: const Duration(milliseconds: 200),
             curve: Curves.easeOutCubic,
           );
         }
@@ -557,14 +770,13 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                 .clamp(0.0, _outerScrollController.position.maxScrollExtent);
         _outerScrollController.animateTo(
           targetY,
-          duration: const Duration(milliseconds: 260),
+          duration: const Duration(milliseconds: 240),
           curve: Curves.easeOutCubic,
         );
       }
     });
   }
 
-  // ==================== قياس دقيق لمنع التفاف أي رقم سطر أو سطر كود ====================
   double _measureExactLineHeight(
     TextStyle style,
     StrutStyle strut,
@@ -593,61 +805,44 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     return tp.width + 22.0;
   }
 
-  double _measureLongestLineWidth(
-    List<String> lines,
+  double _measureLongestLineFromCache(
+    String text,
     TextStyle style,
     TextScaler scaler,
     double minWidth,
   ) {
-    // نفحص أطول 8 أسطر لتفادي القياس البطيء على آلاف الأسطر
-    final List<String> topLines = [];
-    int thresholdLen = 40;
-    for (final l in lines) {
-      if (l.length >= thresholdLen) {
-        topLines.add(l);
-        if (topLines.length > 16) {
-          topLines.sort((a, b) => b.length.compareTo(a.length));
-          topLines.removeRange(8, topLines.length);
-          thresholdLen = topLines.last.length;
-        }
-      }
-    }
-    double maxW = minWidth;
-    for (final sample in topLines) {
-      final tp = TextPainter(
-        text: TextSpan(text: sample, style: style),
-        textDirection: TextDirection.ltr,
-        textScaler: scaler,
-      )..layout();
-      if (tp.width + 80.0 > maxW) {
-        maxW = tp.width + 80.0;
-      }
-    }
-    return maxW;
+    if (_lineStarts.isEmpty) return minWidth;
+    final int idx = _longestLineIndex.clamp(0, _lineStarts.length - 1);
+    final int start = _lineStarts[idx];
+    final int end =
+        idx + 1 < _lineStarts.length ? _lineStarts[idx + 1] - 1 : text.length;
+    if (end <= start) return minWidth;
+    final sample = text.substring(start, end);
+    final tp = TextPainter(
+      text: TextSpan(text: sample, style: style),
+      textDirection: TextDirection.ltr,
+      textScaler: scaler,
+    )..layout();
+    return math.max(minWidth, tp.width + 80.0);
   }
 
-  String _computeSignature() {
-    return [
-      _titleController.text,
-      _contentController.text,
-      _selectedCategory,
-      _customTitleColor?.toString() ?? '',
-      _customContentColor?.toString() ?? '',
-      _fontFamily,
-      _titleFontSize.toStringAsFixed(1),
-      _contentFontSize.toStringAsFixed(1),
-      _isPinned.toString(),
-      _isLocked.toString(),
-      _codeMode,
-      _manualLangId,
-      _imagePaths.join('|'),
-      _audioRecords.map((e) => '${e['path']}:${e['name']}').join('|'),
-      _tags.join('|'),
-      _checklist.map((e) => '${e['text']}:${e['done']}').join('|'),
-    ].join('§');
+  bool get _hasUnsavedChanges {
+    return _titleController.text != _initTitle ||
+        _contentController.text != _initContent ||
+        _selectedCategory != _initCategory ||
+        _customTitleColor != _initTitleColor ||
+        _customContentColor != _initContentColor ||
+        _fontFamily != _initFont ||
+        _contentFontSize != _initContentSize ||
+        _isPinned != _initPinned ||
+        _isLocked != _initLocked ||
+        _codeMode != _initCodeMode ||
+        _manualLangId != _initLangId ||
+        _imagePaths.length != _initImagesLen ||
+        _audioRecords.length != _initAudiosLen ||
+        _tags.length != _initTagsLen ||
+        _checklist.length != _initCheckLen;
   }
-
-  bool get _hasUnsavedChanges => _computeSignature() != _initialSignature;
 
   Future<void> _stopRecordingSafelyIfNeeded({bool saveResult = false}) async {
     if (!_isRecording) return;
@@ -1224,7 +1419,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       selection: TextSelection.collapsed(offset: newOffset),
     );
     _applyingHistory = false;
+    _rebuildFastMetrics(newText);
     _refreshCodeDetection();
+    _scheduleHeavyAnalysis(newText);
     setState(() {});
   }
 
@@ -1520,7 +1717,10 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                     onTap: _setReminder,
                   ),
                   ListTile(
-                    leading: Icon(Icons.find_in_page_outlined, color: pal.textPrimary),
+                    leading: Icon(
+                      Icons.find_in_page_outlined,
+                      color: pal.textPrimary,
+                    ),
                     title: Text(
                       'البحث والاستبدال داخل الملاحظة',
                       style: TextStyle(color: pal.textPrimary),
@@ -1687,20 +1887,15 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     return '$m:$s';
   }
 
-  int _wordCount(String txt) {
-    final clean = txt.trim();
-    if (clean.isEmpty) return 0;
-    return clean.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
-  }
-
   Widget _buildFindAndReplaceBar(OnyxPalette pal) {
     final int? lineJumpTarget = _parseLineJumpQuery(_findController.text);
     final int total = _searchMatches.length;
+    final String totalStr = _matchesCapped ? '$total+' : '$total';
     final String countText = lineJumpTarget != null
         ? 'سطر $lineJumpTarget'
         : total == 0
             ? '0 / 0'
-            : '${_activeMatchIndex + 1} / $total';
+            : '${_activeMatchIndex + 1} / $totalStr';
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
@@ -1714,7 +1909,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
             Row(
               children: [
                 GestureDetector(
-                  onTap: () => setState(() => _showReplaceRow = !_showReplaceRow),
+                  onTap: () =>
+                      setState(() => _showReplaceRow = !_showReplaceRow),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 4),
                     child: Icon(
@@ -1732,8 +1928,15 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                     controller: _findController,
                     focusNode: _findFocusNode,
                     style: TextStyle(color: pal.textPrimary, fontSize: 13.5),
-                    onChanged: (_) => _recomputeSearchMatches(jumpToFirst: true),
-                    onSubmitted: (_) => _stepMatch(1),
+                    onChanged: _onFindTextChanged,
+                    onSubmitted: (_) {
+                      _findDebounceTimer?.cancel();
+                      if (_searchMatches.isEmpty) {
+                        _recomputeSearchMatches(jumpToFirst: true);
+                      } else {
+                        _stepMatch(1);
+                      }
+                    },
                     decoration: InputDecoration(
                       isDense: true,
                       contentPadding: const EdgeInsets.symmetric(
@@ -1753,7 +1956,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                 ),
                 const SizedBox(width: 6),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
                   decoration: BoxDecoration(
                     color: pal.chipBg,
                     borderRadius: BorderRadius.circular(8),
@@ -1795,7 +1999,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   ),
                 ),
                 IconButton(
-                  constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                  constraints:
+                      const BoxConstraints(minWidth: 30, minHeight: 30),
                   padding: EdgeInsets.zero,
                   tooltip: 'النتيجة السابقة',
                   icon: Icon(
@@ -1806,7 +2011,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   onPressed: total > 0 ? () => _stepMatch(-1) : null,
                 ),
                 IconButton(
-                  constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                  constraints:
+                      const BoxConstraints(minWidth: 30, minHeight: 30),
                   padding: EdgeInsets.zero,
                   tooltip: 'النتيجة التالية',
                   icon: Icon(
@@ -1816,11 +2022,13 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                         : pal.textMuted,
                     size: 22,
                   ),
-                  onPressed:
-                      total > 0 || lineJumpTarget != null ? () => _stepMatch(1) : null,
+                  onPressed: total > 0 || lineJumpTarget != null
+                      ? () => _stepMatch(1)
+                      : null,
                 ),
                 IconButton(
-                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  constraints:
+                      const BoxConstraints(minWidth: 28, minHeight: 28),
                   padding: EdgeInsets.zero,
                   tooltip: 'إغلاق البحث',
                   icon: Icon(Icons.close, color: pal.textMuted, size: 18),
@@ -1844,7 +2052,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                           vertical: 8,
                         ),
                         hintText: 'استبدال بالكلمة أو السطر الجديد...',
-                        hintStyle: TextStyle(color: pal.textMuted, fontSize: 12),
+                        hintStyle:
+                            TextStyle(color: pal.textMuted, fontSize: 12),
                         filled: true,
                         fillColor: pal.inputFill,
                         border: OutlineInputBorder(
@@ -1890,7 +2099,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                         borderRadius: BorderRadius.circular(9),
                       ),
                     ),
-                    onPressed: total > 0 ? _replaceAllMatches : null,
+                    onPressed: _findController.text.isNotEmpty
+                        ? _replaceAllMatches
+                        : null,
                     child: Text(
                       'الكل',
                       style: TextStyle(
@@ -1912,39 +2123,68 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   Widget _buildReadableNoteArea(OnyxPalette pal, TextStyle contentStyle) {
     _disposeLinkRecognizers();
     final text = _contentController.text;
-    final links = LinkDetector.extractLinks(text, unique: false);
+    final links = _cachedLinks;
     final Color linkColor =
         pal.isDark ? const Color(0xFF7CC4FF) : const Color(0xFF1D4ED8);
 
     final List<InlineSpan> spans = [];
     int pos = 0;
 
-    for (final link in links) {
-      if (link.start > pos) {
+    if (text.length <= 20000) {
+      for (final link in LinkDetector.extractLinks(text, unique: false)) {
+        if (link.start > pos) {
+          spans.add(
+            TextSpan(
+              text: text.substring(pos, link.start),
+              style: contentStyle,
+            ),
+          );
+        }
+        final recognizer = TapGestureRecognizer()
+          ..onTap = () => _launchLink(link.normalizedUrl);
+        _linkRecognizers.add(recognizer);
+
         spans.add(
           TextSpan(
-            text: text.substring(pos, link.start),
-            style: contentStyle,
+            text: text.substring(link.start, link.end),
+            recognizer: recognizer,
+            style: contentStyle.copyWith(
+              color: linkColor,
+              decoration: TextDecoration.underline,
+              decorationColor: linkColor,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         );
+        pos = link.end;
       }
-      final recognizer = TapGestureRecognizer()
-        ..onTap = () => _launchLink(link.normalizedUrl);
-      _linkRecognizers.add(recognizer);
-
-      spans.add(
-        TextSpan(
-          text: text.substring(link.start, link.end),
-          recognizer: recognizer,
-          style: contentStyle.copyWith(
-            color: linkColor,
-            decoration: TextDecoration.underline,
-            decorationColor: linkColor,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      );
-      pos = link.end;
+    } else if (links.isNotEmpty) {
+      for (final link in links) {
+        if (link.start > pos && link.end <= text.length) {
+          spans.add(
+            TextSpan(
+              text: text.substring(pos, link.start),
+              style: contentStyle,
+            ),
+          );
+          final recognizer = TapGestureRecognizer()
+            ..onTap = () => _launchLink(link.normalizedUrl);
+          _linkRecognizers.add(recognizer);
+          spans.add(
+            TextSpan(
+              text: text.substring(link.start, link.end),
+              recognizer: recognizer,
+              style: contentStyle.copyWith(
+                color: linkColor,
+                decoration: TextDecoration.underline,
+                decorationColor: linkColor,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          );
+          pos = link.end;
+        }
+      }
     }
 
     if (pos < text.length) {
@@ -2068,8 +2308,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   }
 
   Widget _buildCodeEditorArea(OnyxPalette pal) {
-    final lines = _contentController.text.split('\n');
-    final int lineCount = math.max(1, lines.length);
+    final int lineCount = math.max(1, _lineStarts.length);
     final double codeFontSize = _contentFontSize.clamp(12.0, 20.0);
     final scaler = MediaQuery.textScalerOf(context);
 
@@ -2089,26 +2328,37 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     final double exactLineHeight =
         _measureExactLineHeight(codeStyle, codeStrut, scaler);
     final double gutterWidth = _measureGutterWidth(lineCount, codeStyle, scaler);
-    final double totalCodeHeight = math.max(240.0, lineCount * exactLineHeight + 24.0);
+    final double totalCodeHeight =
+        math.max(240.0, lineCount * exactLineHeight + 24.0);
 
-    // رقم السطر النشط (نتيجة البحث الحالية أو موضع المؤشر)
     int activeLine = -1;
     if (_activeMatchIndex >= 0 && _activeMatchIndex < _searchMatches.length) {
-      final off = _searchMatches[_activeMatchIndex].start
-          .clamp(0, _contentController.text.length);
-      activeLine = '\n'.allMatches(_contentController.text.substring(0, off)).length;
+      activeLine = _lineIndexOfOffset(_searchMatches[_activeMatchIndex].start);
     } else if (_contentController.selection.isValid &&
         _contentController.selection.start >= 0) {
-      final off = _contentController.selection.start
-          .clamp(0, _contentController.text.length);
-      activeLine = '\n'.allMatches(_contentController.text.substring(0, off)).length;
+      activeLine = _lineIndexOfOffset(_contentController.selection.start);
     }
 
-    return Onyx3DGlassCard(
+    // استخدام حاوية زجاجية خفيفة بدون BackdropFilter فوق حاوية ضخمة لضمان 60fps
+    return Container(
       key: _editorAreaKey,
-      padding: EdgeInsets.zero,
-      borderRadius: 20,
-      isHighlighted: true,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [pal.cardTop, pal.cardBottom],
+        ),
+        border: Border.all(color: pal.glassStrongBorder, width: 1.15),
+        boxShadow: [
+          BoxShadow(
+            color: pal.shadowDeep,
+            blurRadius: 18,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -2164,8 +2414,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
               builder: (context, constraints) {
                 final double minAvailW =
                     math.max(160.0, constraints.maxWidth - gutterWidth - 8);
-                final double editorWidth = _measureLongestLineWidth(
-                  lines,
+                final double editorWidth = _measureLongestLineFromCache(
+                  _contentController.text,
                   codeStyle,
                   scaler,
                   minAvailW,
@@ -2174,7 +2424,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                 return Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // عمود الأرقام المرسوم برمجيًا (لا يلتف أبدًا ولا يبطئ حتى 100 ألف سطر)
                     Container(
                       width: gutterWidth,
                       height: totalCodeHeight,
@@ -2211,7 +2460,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                         child: SizedBox(
                           width: editorWidth,
                           child: ConstrainedBox(
-                            constraints: BoxConstraints(minHeight: totalCodeHeight),
+                            constraints:
+                                BoxConstraints(minHeight: totalCodeHeight),
                             child: TextField(
                               controller: _contentController,
                               scrollController: _contentScrollController,
@@ -2247,9 +2497,12 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   List<double> _computeMatchFractions() {
     final totalLen = _contentController.text.length;
     if (totalLen == 0 || _searchMatches.isEmpty) return const [];
-    return _searchMatches
-        .map((m) => (m.start / totalLen).clamp(0.0, 1.0))
-        .toList();
+    final int step = math.max(1, (_searchMatches.length / 100).ceil());
+    final List<double> res = [];
+    for (int i = 0; i < _searchMatches.length; i += step) {
+      res.add((_searchMatches[i].start / totalLen).clamp(0.0, 1.0));
+    }
+    return res;
   }
 
   @override
@@ -2282,15 +2535,13 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
           ),
         );
 
-        final int words = _wordCount(_contentController.text);
-        final int linesCount = _contentController.text.isEmpty
-            ? 0
-            : _contentController.text.split('\n').length;
+        final int words = _cachedWords;
+        final int linesCount =
+            _contentController.text.isEmpty ? 0 : _lineStarts.length;
         final int doneCount =
             _checklist.where((c) => c['done'] == true).length;
         final CodeLanguageInfo? activeLang = _activeLanguage;
-        final List<DetectedLink> detectedLinks =
-            LinkDetector.extractLinks(_contentController.text);
+        final List<DetectedLink> detectedLinks = _cachedLinks;
 
         return PopScope(
           canPop: false,
@@ -2303,6 +2554,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
             resizeToAvoidBottomInset: true,
             appBar: AppBar(
               backgroundColor: Colors.transparent,
+              leadingWidth: 46,
+              titleSpacing: 0,
+              title: const SizedBox.shrink(),
               iconTheme: IconThemeData(color: pal.textPrimary),
               leading: IconButton(
                 icon: const Icon(Icons.arrow_back),
@@ -2310,15 +2564,21 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
               ),
               actions: [
                 IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                  padding: EdgeInsets.zero,
                   tooltip: 'البحث والاستبدال',
                   icon: Icon(
                     _showFindBar ? Icons.search_off : Icons.search,
-                    size: 21,
+                    size: 20,
                     color: _showFindBar ? pal.accent : pal.textPrimary,
                   ),
                   onPressed: _toggleFindBar,
                 ),
                 IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                  padding: EdgeInsets.zero,
                   tooltip:
                       _isReadingMode ? 'وضع التحرير' : 'وضع القراءة والروابط',
                   icon: Icon(
@@ -2332,6 +2592,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                       setState(() => _isReadingMode = !_isReadingMode),
                 ),
                 IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                  padding: EdgeInsets.zero,
                   tooltip: 'تراجع',
                   icon: Icon(
                     Icons.undo,
@@ -2341,6 +2604,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   onPressed: _undoStack.isEmpty ? null : _undo,
                 ),
                 IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                  padding: EdgeInsets.zero,
                   tooltip: 'إعادة',
                   icon: Icon(
                     Icons.redo,
@@ -2350,6 +2616,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   onPressed: _redoStack.isEmpty ? null : _redo,
                 ),
                 IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                  padding: EdgeInsets.zero,
                   tooltip: _isLocked ? 'مقفلة' : 'قفل الملاحظة',
                   icon: Icon(
                     _isLocked ? Icons.lock : Icons.lock_open_outlined,
@@ -2359,6 +2628,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   onPressed: () => setState(() => _isLocked = !_isLocked),
                 ),
                 IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 36, minHeight: 36),
+                  padding: EdgeInsets.zero,
                   tooltip: 'تثبيت',
                   icon: Icon(
                     _isPinned ? Icons.push_pin : Icons.push_pin_outlined,
@@ -2368,10 +2640,14 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   onPressed: () => setState(() => _isPinned = !_isPinned),
                 ),
                 IconButton(
+                  constraints:
+                      const BoxConstraints(minWidth: 40, minHeight: 40),
+                  padding: EdgeInsets.zero,
                   tooltip: 'حفظ',
                   icon: Icon(Icons.check, color: pal.textPrimary),
                   onPressed: _saveNote,
                 ),
+                const SizedBox(width: 4),
               ],
             ),
             body: OnyxBackdrop(
@@ -2384,7 +2660,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                       children: [
                         SingleChildScrollView(
                           controller: _outerScrollController,
-                          padding: const EdgeInsets.fromLTRB(16, 12, 22, 24),
+                          padding: const EdgeInsets.fromLTRB(16, 12, 24, 24),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
@@ -3046,7 +3322,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                           ),
                         ),
 
-                        // شريط التمرير السريع الاحترافي (مع مؤشرات البحث وفقاعة السطر)
                         _LuxuryFastScroller(
                           controller: _outerScrollController,
                           palette: pal,
@@ -3193,7 +3468,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   }
 }
 
-/// راسم أرقام الأسطر فائق السرعة — يرسم فقط الأسطر الظاهرة على الشاشة بلا أي التفاف
 class _ViewportLineNumbersPainter extends CustomPainter {
   final int lineCount;
   final double lineHeight;
@@ -3269,7 +3543,6 @@ class _ViewportLineNumbersPainter extends CustomPainter {
   bool shouldRepaint(covariant _ViewportLineNumbersPainter oldDelegate) => true;
 }
 
-/// شريط التمرير السريع الجانبي بفقاعة رقم السطر وعلامات نتائج البحث
 class _LuxuryFastScroller extends StatefulWidget {
   final ScrollController controller;
   final OnyxPalette palette;
@@ -3397,7 +3670,6 @@ class _LuxuryFastScrollerState extends State<_LuxuryFastScroller> {
                       child: Stack(
                         alignment: Alignment.topCenter,
                         children: [
-                          // مسار خفيف
                           Container(
                             width: 4,
                             height: trackH,
@@ -3406,8 +3678,7 @@ class _LuxuryFastScrollerState extends State<_LuxuryFastScroller> {
                               borderRadius: BorderRadius.circular(99),
                             ),
                           ),
-                          // علامات نتائج البحث على الشريط
-                          ...widget.matchFractions.take(120).map(
+                          ...widget.matchFractions.map(
                                 (mf) => Positioned(
                                   top: mf * (trackH - 4),
                                   child: Container(
@@ -3420,7 +3691,6 @@ class _LuxuryFastScrollerState extends State<_LuxuryFastScroller> {
                                   ),
                                 ),
                               ),
-                          // مقبض التمرير الزجاجي البارز
                           Positioned(
                             top: thumbTop,
                             child: AnimatedContainer(
