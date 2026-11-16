@@ -33,12 +33,22 @@ class AddNoteScreen extends StatefulWidget {
   State<AddNoteScreen> createState() => _AddNoteScreenState();
 }
 
-class _AddNoteScreenState extends State<AddNoteScreen> {
+class _AddNoteScreenState extends State<AddNoteScreen>
+    with WidgetsBindingObserver {
   late final TextEditingController _titleController;
   late final CodeSyntaxTextController _contentController;
   final TextEditingController _tagController = TextEditingController();
   final TextEditingController _todoController = TextEditingController();
+
   final ScrollController _contentScrollController = ScrollController();
+  final ScrollController _horizontalCodeScrollController = ScrollController();
+  final ScrollController _readingScrollController = ScrollController();
+
+  final FocusNode _editorFocusNode = FocusNode();
+  final FocusNode _titleFocusNode = FocusNode();
+  final FocusNode _tagFocusNode = FocusNode();
+  final FocusNode _todoFocusNode = FocusNode();
+
   final List<TapGestureRecognizer> _linkRecognizers = [];
 
   String _selectedCategory = 'عام';
@@ -60,7 +70,12 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   bool _isReadingMode = false;
   bool _showExtrasPanel = false;
 
-  // إحصائيات محدثة بشكل مؤجّل (Debounce) لمنع أي تعليق مع الملفات الضخمة
+  // منع اختفاء التحديد عند إخفاء الكيبورد بزر السهم السفلي
+  bool _suppressKeyboard = false;
+  TextSelection? _lastNonCollapsedSelection;
+  DateTime? _lastSelectionTime;
+  double _prevBottomInset = 0.0;
+
   Timer? _metaDebounce;
   Timer? _undoDebounce;
   int _cachedLineCount = 1;
@@ -99,12 +114,15 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
     final n = widget.note;
     final initialTitle = n != null ? (n['title'] ?? '').toString() : '';
     final initialContent = n != null ? (n['content'] ?? '').toString() : '';
 
     _titleController = TextEditingController(text: initialTitle);
     _contentController = CodeSyntaxTextController(text: initialContent);
+    _contentController.addListener(_trackSelectionListener);
     _lastUndoSnapshot = initialContent;
 
     final cat = n != null ? (n['category'] as String? ?? 'عام') : 'عام';
@@ -158,6 +176,52 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     });
   }
 
+  void _trackSelectionListener() {
+    final sel = _contentController.selection;
+    if (sel.isValid && !sel.isCollapsed) {
+      _lastNonCollapsedSelection = sel;
+      _lastSelectionTime = DateTime.now();
+    }
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    if (!mounted) return;
+    final view = WidgetsBinding.instance.platformDispatcher.views.first;
+    final double bottomInset = view.viewInsets.bottom / view.devicePixelRatio;
+
+    // إذا تم إغلاق الكيبورد بزر النظام السفلي أثناء وجود تحديد، نحفظ التحديد ونمنع اختفاءه
+    if (_prevBottomInset > 80 && bottomInset < 20) {
+      final sel = _lastNonCollapsedSelection;
+      final t = _lastSelectionTime;
+      final bool otherFieldFocused = _titleFocusNode.hasFocus ||
+          _tagFocusNode.hasFocus ||
+          _todoFocusNode.hasFocus;
+
+      if (!otherFieldFocused &&
+          sel != null &&
+          !sel.isCollapsed &&
+          t != null &&
+          DateTime.now().difference(t).inSeconds < 5) {
+        if (!_suppressKeyboard) {
+          setState(() => _suppressKeyboard = true);
+        }
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final maxLen = _contentController.text.length;
+          final safeSel = TextSelection(
+            baseOffset: sel.baseOffset.clamp(0, maxLen),
+            extentOffset: sel.extentOffset.clamp(0, maxLen),
+          );
+          _editorFocusNode.requestFocus();
+          _contentController.selection = safeSel;
+        });
+      }
+    }
+    _prevBottomInset = bottomInset;
+  }
+
   void _disposeLinkRecognizers() {
     for (final r in _linkRecognizers) {
       r.dispose();
@@ -167,6 +231,8 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _contentController.removeListener(_trackSelectionListener);
     _disposeLinkRecognizers();
     _metaDebounce?.cancel();
     _undoDebounce?.cancel();
@@ -181,6 +247,12 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     _tagController.dispose();
     _todoController.dispose();
     _contentScrollController.dispose();
+    _horizontalCodeScrollController.dispose();
+    _readingScrollController.dispose();
+    _editorFocusNode.dispose();
+    _titleFocusNode.dispose();
+    _tagFocusNode.dispose();
+    _todoFocusNode.dispose();
     super.dispose();
   }
 
@@ -212,7 +284,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     _contentController.languageId = _activeLanguage?.id ?? 'dart';
   }
 
-  // حساب الأسطر وأقصى طول سطر بدون تخصيص ذاكرة أو split() بطيئة
   void _computeFastMetrics(String text) {
     if (text.isEmpty) {
       _cachedLineCount = 1;
@@ -239,9 +310,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     _cachedLineCount = lines;
     _cachedMaxLineCols = maxCols;
 
-    // عدّ الكلمات بسرعة فائقة دون RegExp على كامل 250KB
     if (text.length > 60000) {
-      // تقدير دقيق وسريع جداً للملفات الضخمة أو عد سريع
       int words = 0;
       bool inSpace = true;
       for (int i = 0; i < text.length; i++) {
@@ -267,8 +336,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     final text = _contentController.text;
     _computeFastMetrics(text);
     _refreshCodeControllerFlags();
-    final linkSample =
-        text.length > 35000 ? text.substring(0, 35000) : text;
+    final linkSample = text.length > 35000 ? text.substring(0, 35000) : text;
     _cachedLinks = LinkDetector.extractLinks(linkSample);
   }
 
@@ -287,7 +355,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       });
     }
 
-    // تحديث الأسطر والطول فورياً أو بمؤقت خفيف لمنع تقطيع الكتابة على 5000+ سطر
     _metaDebounce?.cancel();
     _metaDebounce = Timer(
       Duration(milliseconds: newVal.length > 15000 ? 320 : 120),
@@ -514,6 +581,341 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     }
   }
 
+  // استخراج دقيق لسطر مفرد بالرقم 1-based دون تقطيع النص كله
+  String _getLineTextAt(String text, int lineNumber) {
+    if (text.isEmpty || lineNumber < 1) return '';
+    int currentLine = 1;
+    int idx = 0;
+    while (currentLine < lineNumber && idx < text.length) {
+      final nl = text.indexOf('\n', idx);
+      if (nl == -1) return '';
+      idx = nl + 1;
+      currentLine++;
+    }
+    final nextNl = text.indexOf('\n', idx);
+    final end = nextNl == -1 ? text.length : nextNl;
+    return text.substring(idx, end).trim();
+  }
+
+  // استخراج دقيق لنطاق الأسطر من سطر البداية إلى سطر النهاية (شامل)
+  ({int start, int end}) _getLineOffsetRange(
+    String text,
+    int fromLine,
+    int toLine,
+  ) {
+    int startOffset = 0;
+    if (fromLine > 1) {
+      int currentLine = 1;
+      int idx = 0;
+      while (currentLine < fromLine && idx < text.length) {
+        final nl = text.indexOf('\n', idx);
+        if (nl == -1) {
+          idx = text.length;
+          break;
+        }
+        idx = nl + 1;
+        currentLine++;
+      }
+      startOffset = idx;
+    }
+
+    int endOffset = text.length;
+    int scan = startOffset;
+    int lineAtScan = fromLine;
+    while (lineAtScan <= toLine) {
+      final nl = text.indexOf('\n', scan);
+      if (nl == -1) {
+        endOffset = text.length;
+        break;
+      }
+      if (lineAtScan == toLine) {
+        endOffset = nl;
+        break;
+      }
+      scan = nl + 1;
+      lineAtScan++;
+    }
+    return (start: startOffset, end: endOffset);
+  }
+
+  Future<void> _showLineRangeCopyDialog(OnyxPalette pal) async {
+    final text = _contentController.text;
+    if (text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('الملاحظة فارغة حالياً')),
+      );
+      return;
+    }
+
+    _computeFastMetrics(text);
+    final int totalLines = _cachedLineCount;
+    final fromController = TextEditingController(text: '1');
+    final toController = TextEditingController(text: '$totalLines');
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) {
+          final int? f = int.tryParse(fromController.text.trim());
+          final int? t = int.tryParse(toController.text.trim());
+          final bool valid =
+              f != null && t != null && f >= 1 && t >= f && t <= totalLines;
+          final String firstPreview =
+              valid ? _getLineTextAt(text, f) : '';
+          final String lastPreview =
+              valid ? _getLineTextAt(text, t) : '';
+
+          return AlertDialog(
+            backgroundColor: pal.elevatedBg,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(22),
+              side: BorderSide(color: pal.glassStrongBorder),
+            ),
+            title: Row(
+              children: [
+                Icon(Icons.playlist_add_check, color: pal.textPrimary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'نسخ وتحديد نطاق أسطر',
+                    style: TextStyle(
+                      color: pal.textPrimary,
+                      fontSize: 16.5,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'إجمالي الأسطر المتاحة: $totalLines سطر',
+                    style: TextStyle(color: pal.textMuted, fontSize: 12),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: fromController,
+                          keyboardType: TextInputType.number,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.digitsOnly,
+                          ],
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: pal.textPrimary,
+                            fontSize: 17,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          onChanged: (_) => setModalState(() {}),
+                          decoration: InputDecoration(
+                            labelText: 'من سطر',
+                            labelStyle: TextStyle(
+                              color: pal.textSecondary,
+                              fontSize: 13,
+                            ),
+                            filled: true,
+                            fillColor: pal.inputFill,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide(color: pal.glassBorder),
+                            ),
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        child: Icon(
+                          Icons.arrow_back,
+                          color: pal.textMuted,
+                          size: 18,
+                        ),
+                      ),
+                      Expanded(
+                        child: TextField(
+                          controller: toController,
+                          keyboardType: TextInputType.number,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.digitsOnly,
+                          ],
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: pal.textPrimary,
+                            fontSize: 17,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          onChanged: (_) => setModalState(() {}),
+                          decoration: InputDecoration(
+                            labelText: 'إلى سطر',
+                            labelStyle: TextStyle(
+                              color: pal.textSecondary,
+                              fontSize: 13,
+                            ),
+                            filled: true,
+                            fillColor: pal.inputFill,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide(color: pal.glassBorder),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  if (valid)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: pal.chipBg,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: pal.glassBorder),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'سيتم نسخ ${t - f + 1} سطر بدقة:',
+                            style: TextStyle(
+                              color: pal.textPrimary,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 5),
+                          Text(
+                            'البداية ($f): ${firstPreview.isEmpty ? '(سطر فارغ)' : firstPreview}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: pal.textSecondary,
+                              fontSize: 11.5,
+                              fontFamily: 'monospace',
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            'النهاية ($t): ${lastPreview.isEmpty ? '(سطر فارغ)' : lastPreview}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: pal.textSecondary,
+                              fontSize: 11.5,
+                              fontFamily: 'monospace',
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else
+                    Text(
+                      'أدخل أرقاماً صحيحة بين 1 و $totalLines بحيث يكون سطر البداية أصغر أو مساوياً للنهاية.',
+                      style: TextStyle(color: pal.danger, fontSize: 12),
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text('إلغاء', style: TextStyle(color: pal.textMuted)),
+              ),
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: valid ? pal.accent : pal.chipBg,
+                  foregroundColor: valid ? pal.onAccent : pal.textMuted,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed: !valid
+                    ? null
+                    : () async {
+                        final range = _getLineOffsetRange(text, f, t);
+                        final extracted =
+                            text.substring(range.start, range.end);
+                        await Clipboard.setData(ClipboardData(text: extracted));
+                        if (!mounted) return;
+                        Navigator.pop(ctx);
+
+                        // تحديد النطاق في المحرر مع إبقاء الكيبورد مخفياً
+                        if (!_isReadingMode) {
+                          setState(() => _suppressKeyboard = true);
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (!mounted) return;
+                            _editorFocusNode.requestFocus();
+                            _contentController.selection = TextSelection(
+                              baseOffset: range.start,
+                              extentOffset: range.end,
+                            );
+                            if (_contentScrollController.hasClients) {
+                              final lineH =
+                                  _contentFontSize.clamp(12.0, 20.0) * 1.5;
+                              final targetY = ((f - 1) * lineH).clamp(
+                                0.0,
+                                _contentScrollController
+                                    .position.maxScrollExtent,
+                              );
+                              _contentScrollController.animateTo(
+                                targetY,
+                                duration: const Duration(milliseconds: 280),
+                                curve: Curves.easeOutCubic,
+                              );
+                            }
+                          });
+                        }
+
+                        ScaffoldMessenger.of(this.context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'تم تحديد ونسخ الأسطر $f إلى $t (${extracted.length} حرف) بدقة',
+                            ),
+                          ),
+                        );
+                      },
+                icon: const Icon(Icons.check, size: 18),
+                label: const Text(
+                  'نسخ وتحديد',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    fromController.dispose();
+    toController.dispose();
+  }
+
+  void _toggleKeyboardVisibility() {
+    setState(() => _suppressKeyboard = !_suppressKeyboard);
+    if (_suppressKeyboard) {
+      final sel = _contentController.selection;
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _editorFocusNode.requestFocus();
+        if (sel.isValid) {
+          _contentController.selection = sel;
+        }
+      });
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _editorFocusNode.requestFocus();
+        SystemChannels.textInput.invokeMethod('TextInput.show');
+      });
+    }
+  }
+
   Future<void> _setReminder() async {
     final pal = OnyxPalette.of(OnyxSettings.isDark);
     final TimeOfDay? time = await showTimePicker(
@@ -602,11 +1004,17 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
               if (query.isEmpty) return;
               final startIndex = _contentController.text.indexOf(query);
               if (startIndex != -1) {
-                setState(() => _isReadingMode = false);
-                _contentController.selection = TextSelection(
-                  baseOffset: startIndex,
-                  extentOffset: startIndex + query.length,
-                );
+                setState(() {
+                  _isReadingMode = false;
+                  _suppressKeyboard = true;
+                });
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _editorFocusNode.requestFocus();
+                  _contentController.selection = TextSelection(
+                    baseOffset: startIndex,
+                    extentOffset: startIndex + query.length,
+                  );
+                });
               } else {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('لم يتم العثور على النص.')),
@@ -1297,6 +1705,20 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                   ),
                   ListTile(
                     leading: Icon(
+                      Icons.playlist_add_check,
+                      color: pal.textPrimary,
+                    ),
+                    title: Text(
+                      'تحديد ونسخ نطاق أسطر (من - إلى)',
+                      style: TextStyle(color: pal.textPrimary),
+                    ),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showLineRangeCopyDialog(pal);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(
                       _isLocked ? Icons.lock_open : Icons.lock_outline,
                       color: pal.textPrimary,
                     ),
@@ -1448,7 +1870,26 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
     return '$m:$s';
   }
 
-  // وضع القراءة والتصفح فائق السرعة عبر ListView.builder + SelectionArea (120fps على 5000+ سطر)
+  Widget _wrapWithSideScrollbar({
+    required ScrollController controller,
+    required OnyxPalette pal,
+    required Widget child,
+  }) {
+    return RawScrollbar(
+      controller: controller,
+      thumbVisibility: true,
+      trackVisibility: true,
+      interactive: true,
+      thickness: 7.5,
+      minThumbLength: 42,
+      radius: const Radius.circular(99),
+      thumbColor: pal.textPrimary.withOpacity(0.42),
+      trackColor: pal.chipBg,
+      trackBorderColor: Colors.transparent,
+      child: child,
+    );
+  }
+
   Widget _buildVirtualizedReadingArea(
     OnyxPalette pal,
     TextStyle contentStyle,
@@ -1472,7 +1913,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
       );
     }
 
-    // تقسيم النص إلى كتل من 24 سطر للتصفح والتحديد الفوري بدون تعليق
     final allLines = text.split('\n');
     const int chunkSize = 24;
     final int chunkCount = (allLines.length / chunkSize).ceil();
@@ -1493,102 +1933,112 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
         border: Border.all(color: pal.glassBorder),
       ),
       clipBehavior: Clip.antiAlias,
-      child: SelectionArea(
-        child: Directionality(
-          textDirection: isCode ? TextDirection.ltr : TextDirection.rtl,
-          child: ListView.builder(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-            itemCount: chunkCount,
-            itemBuilder: (context, chunkIdx) {
-              final int startLine = chunkIdx * chunkSize;
-              final int endLine =
-                  math.min(startLine + chunkSize, allLines.length);
-              final String chunkText =
-                  allLines.sublist(startLine, endLine).join('\n');
+      child: _wrapWithSideScrollbar(
+        controller: _readingScrollController,
+        pal: pal,
+        child: SelectionArea(
+          child: Directionality(
+            textDirection: isCode ? TextDirection.ltr : TextDirection.rtl,
+            child: ListView.builder(
+              controller: _readingScrollController,
+              padding: const EdgeInsets.fromLTRB(10, 10, 16, 16),
+              itemCount: chunkCount,
+              itemBuilder: (context, chunkIdx) {
+                final int startLine = chunkIdx * chunkSize;
+                final int endLine =
+                    math.min(startLine + chunkSize, allLines.length);
+                final String chunkText =
+                    allLines.sublist(startLine, endLine).join('\n');
 
-              if (isCode) {
-                final spans = FastCodeTokenizer.tokenizeChunk(
-                  chunkText,
-                  languageId: activeLang?.id ?? 'dart',
-                  isDarkTheme: pal.isDark,
-                  baseStyle: codeStyle,
-                );
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 2),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      SizedBox(
-                        width: _cachedLineCount >= 1000 ? 46 : 38,
-                        child: Text(
-                          List.generate(
-                            endLine - startLine,
-                            (i) => '${startLine + i + 1}',
-                          ).join('\n'),
-                          textAlign: TextAlign.right,
-                          style: TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: codeFontSize,
-                            height: 1.5,
-                            color: pal.textMuted,
+                if (isCode) {
+                  final spans = FastCodeTokenizer.tokenizeChunk(
+                    chunkText,
+                    languageId: activeLang?.id ?? 'dart',
+                    isDarkTheme: pal.isDark,
+                    baseStyle: codeStyle,
+                  );
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 2),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SizedBox(
+                          width: _cachedLineCount >= 1000 ? 46 : 38,
+                          child: Text(
+                            List.generate(
+                              endLine - startLine,
+                              (i) => '${startLine + i + 1}',
+                            ).join('\n'),
+                            textAlign: TextAlign.right,
+                            style: TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: codeFontSize,
+                              height: 1.5,
+                              color: pal.textMuted,
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Text.rich(
-                            TextSpan(style: codeStyle, children: spans),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Text.rich(
+                              TextSpan(style: codeStyle, children: spans),
+                            ),
                           ),
                         ),
+                      ],
+                    ),
+                  );
+                }
+
+                final links =
+                    LinkDetector.extractLinks(chunkText, unique: false);
+                if (links.isEmpty) {
+                  return Text(chunkText, style: contentStyle);
+                }
+
+                final List<InlineSpan> spans = [];
+                int pos = 0;
+                for (final link in links) {
+                  if (link.start > pos) {
+                    spans.add(
+                      TextSpan(
+                        text: chunkText.substring(pos, link.start),
+                        style: contentStyle,
                       ),
-                    ],
-                  ),
-                );
-              }
-
-              // نص عادي مع روابط قابلة للنقر مباشرة
-              final links = LinkDetector.extractLinks(chunkText, unique: false);
-              if (links.isEmpty) {
-                return Text(chunkText, style: contentStyle);
-              }
-
-              final List<InlineSpan> spans = [];
-              int pos = 0;
-              for (final link in links) {
-                if (link.start > pos) {
+                    );
+                  }
+                  final rec = TapGestureRecognizer()
+                    ..onTap = () => _launchLink(link.normalizedUrl);
+                  _linkRecognizers.add(rec);
                   spans.add(
                     TextSpan(
-                      text: chunkText.substring(pos, link.start),
+                      text: chunkText.substring(link.start, link.end),
+                      recognizer: rec,
+                      style: contentStyle.copyWith(
+                        color: linkColor,
+                        decoration: TextDecoration.underline,
+                        decorationColor: linkColor,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  );
+                  pos = link.end;
+                }
+                if (pos < chunkText.length) {
+                  spans.add(
+                    TextSpan(
+                      text: chunkText.substring(pos),
                       style: contentStyle,
                     ),
                   );
                 }
-                final rec = TapGestureRecognizer()
-                  ..onTap = () => _launchLink(link.normalizedUrl);
-                _linkRecognizers.add(rec);
-                spans.add(
-                  TextSpan(
-                    text: chunkText.substring(link.start, link.end),
-                    recognizer: rec,
-                    style: contentStyle.copyWith(
-                      color: linkColor,
-                      decoration: TextDecoration.underline,
-                      decorationColor: linkColor,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+                return Text.rich(
+                  TextSpan(style: contentStyle, children: spans),
                 );
-                pos = link.end;
-              }
-              if (pos < chunkText.length) {
-                spans.add(
-                  TextSpan(text: chunkText.substring(pos), style: contentStyle),
-                );
-              }
-              return Text.rich(TextSpan(style: contentStyle, children: spans));
-            },
+              },
+            ),
           ),
         ),
       ),
@@ -1669,24 +2119,32 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
           border: Border.all(color: pal.glassBorder),
         ),
         clipBehavior: Clip.antiAlias,
-        child: TextField(
-          controller: _contentController,
-          scrollController: _contentScrollController,
-          expands: true,
-          maxLines: null,
-          minLines: null,
-          textAlignVertical: TextAlignVertical.top,
-          autocorrect: _contentController.text.length < 8000,
-          enableSuggestions: _contentController.text.length < 8000,
-          style: contentStyle,
-          onChanged: _onContentChanged,
-          decoration: InputDecoration(
-            contentPadding: const EdgeInsets.all(14),
-            hintText:
-                'اكتب ملاحظتك هنا أو الصق أي رابط فيديو / تواصل أو كود برمجي...',
-            hintMaxLines: 2,
-            hintStyle: TextStyle(color: pal.textMuted),
-            border: InputBorder.none,
+        child: _wrapWithSideScrollbar(
+          controller: _contentScrollController,
+          pal: pal,
+          child: TextField(
+            controller: _contentController,
+            focusNode: _editorFocusNode,
+            scrollController: _contentScrollController,
+            expands: true,
+            maxLines: null,
+            minLines: null,
+            keyboardType: _suppressKeyboard
+                ? TextInputType.none
+                : TextInputType.multiline,
+            textAlignVertical: TextAlignVertical.top,
+            autocorrect: _contentController.text.length < 8000,
+            enableSuggestions: _contentController.text.length < 8000,
+            style: contentStyle,
+            onChanged: _onContentChanged,
+            decoration: InputDecoration(
+              contentPadding: const EdgeInsets.fromLTRB(14, 14, 18, 24),
+              hintText:
+                  'اكتب ملاحظتك هنا أو الصق أي رابط فيديو / تواصل أو كود برمجي...',
+              hintMaxLines: 2,
+              hintStyle: TextStyle(color: pal.textMuted),
+              border: InputBorder.none,
+            ),
           ),
         ),
       );
@@ -1706,27 +2164,36 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
             child: Directionality(
               textDirection: TextDirection.ltr,
               child: _wrapCodeLines
-                  ? TextField(
-                      controller: _contentController,
-                      scrollController: _contentScrollController,
-                      expands: true,
-                      maxLines: null,
-                      minLines: null,
-                      textAlign: TextAlign.left,
-                      textAlignVertical: TextAlignVertical.top,
-                      autocorrect: false,
-                      enableSuggestions: false,
-                      style: codeStyle,
-                      strutStyle: codeStrut,
-                      onChanged: _onContentChanged,
-                      decoration: InputDecoration(
-                        contentPadding: const EdgeInsets.all(12),
-                        hintText: '// اكتب أو الصق الكود البرمجي هنا...',
-                        hintStyle: TextStyle(
-                          color: pal.textMuted,
-                          fontFamily: 'monospace',
+                  ? _wrapWithSideScrollbar(
+                      controller: _contentScrollController,
+                      pal: pal,
+                      child: TextField(
+                        controller: _contentController,
+                        focusNode: _editorFocusNode,
+                        scrollController: _contentScrollController,
+                        expands: true,
+                        maxLines: null,
+                        minLines: null,
+                        keyboardType: _suppressKeyboard
+                            ? TextInputType.none
+                            : TextInputType.multiline,
+                        textAlign: TextAlign.left,
+                        textAlignVertical: TextAlignVertical.top,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        style: codeStyle,
+                        strutStyle: codeStrut,
+                        onChanged: _onContentChanged,
+                        decoration: InputDecoration(
+                          contentPadding:
+                              const EdgeInsets.fromLTRB(12, 12, 18, 24),
+                          hintText: '// اكتب أو الصق الكود البرمجي هنا...',
+                          hintStyle: TextStyle(
+                            color: pal.textMuted,
+                            fontFamily: 'monospace',
+                          ),
+                          border: InputBorder.none,
                         ),
-                        border: InputBorder.none,
                       ),
                     )
                   : LayoutBuilder(
@@ -1742,7 +2209,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                         return Row(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            // رسم أرقام الأسطر الظاهرة فقط عبر CustomPaint بسرعة 120fps
                             SizedBox(
                               width: gutterWidth,
                               child: AnimatedBuilder(
@@ -1764,39 +2230,60 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                               ),
                             ),
                             Expanded(
-                              child: SingleChildScrollView(
-                                scrollDirection: Axis.horizontal,
-                                child: SizedBox(
-                                  width: editorWidth,
-                                  height: constraints.maxHeight,
-                                  child: TextField(
-                                    controller: _contentController,
-                                    scrollController: _contentScrollController,
-                                    expands: true,
-                                    maxLines: null,
-                                    minLines: null,
-                                    textAlign: TextAlign.left,
-                                    textAlignVertical: TextAlignVertical.top,
-                                    autocorrect: false,
-                                    enableSuggestions: false,
-                                    style: codeStyle,
-                                    strutStyle: codeStrut,
-                                    onChanged: _onContentChanged,
-                                    decoration: InputDecoration(
-                                      contentPadding:
-                                          const EdgeInsets.fromLTRB(
-                                        10,
-                                        10,
-                                        16,
-                                        24,
+                              child: _wrapWithSideScrollbar(
+                                controller: _contentScrollController,
+                                pal: pal,
+                                child: RawScrollbar(
+                                  controller: _horizontalCodeScrollController,
+                                  thumbVisibility: true,
+                                  interactive: true,
+                                  thickness: 4.5,
+                                  radius: const Radius.circular(99),
+                                  thumbColor:
+                                      pal.textMuted.withOpacity(0.45),
+                                  child: SingleChildScrollView(
+                                    controller:
+                                        _horizontalCodeScrollController,
+                                    scrollDirection: Axis.horizontal,
+                                    child: SizedBox(
+                                      width: editorWidth,
+                                      height: constraints.maxHeight,
+                                      child: TextField(
+                                        controller: _contentController,
+                                        focusNode: _editorFocusNode,
+                                        scrollController:
+                                            _contentScrollController,
+                                        expands: true,
+                                        maxLines: null,
+                                        minLines: null,
+                                        keyboardType: _suppressKeyboard
+                                            ? TextInputType.none
+                                            : TextInputType.multiline,
+                                        textAlign: TextAlign.left,
+                                        textAlignVertical:
+                                            TextAlignVertical.top,
+                                        autocorrect: false,
+                                        enableSuggestions: false,
+                                        style: codeStyle,
+                                        strutStyle: codeStrut,
+                                        onChanged: _onContentChanged,
+                                        decoration: InputDecoration(
+                                          contentPadding:
+                                              const EdgeInsets.fromLTRB(
+                                            10,
+                                            10,
+                                            20,
+                                            24,
+                                          ),
+                                          hintText:
+                                              '// اكتب أو الصق الكود البرمجي هنا...',
+                                          hintStyle: TextStyle(
+                                            color: pal.textMuted,
+                                            fontFamily: 'monospace',
+                                          ),
+                                          border: InputBorder.none,
+                                        ),
                                       ),
-                                      hintText:
-                                          '// اكتب أو الصق الكود البرمجي هنا...',
-                                      hintStyle: TextStyle(
-                                        color: pal.textMuted,
-                                        fontFamily: 'monospace',
-                                      ),
-                                      border: InputBorder.none,
                                     ),
                                   ),
                                 ),
@@ -1862,7 +2349,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
             backgroundColor: pal.scaffoldBg,
             resizeToAvoidBottomInset: true,
             appBar: AppBar(
-              toolbarHeight: 48,
+              toolbarHeight: 46,
               backgroundColor: Colors.transparent,
               iconTheme: IconThemeData(color: pal.textPrimary),
               leading: IconButton(
@@ -1889,8 +2376,9 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                         setState(() => _showExtrasPanel = !_showExtrasPanel),
                   ),
                 IconButton(
-                  tooltip:
-                      _isReadingMode ? 'وضع التحرير' : 'وضع القراءة والتحديد السريع',
+                  tooltip: _isReadingMode
+                      ? 'وضع التحرير'
+                      : 'وضع القراءة والتحديد السريع',
                   icon: Icon(
                     _isReadingMode
                         ? Icons.edit_outlined
@@ -1949,13 +2437,12 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
             body: OnyxBackdrop(
               palette: pal,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(8, 2, 8, 4),
+                padding: const EdgeInsets.fromLTRB(6, 2, 6, 4),
                 child: Column(
                   children: [
-                    // شريط اللغة المدمج عند تفعيل الكود
                     if (activeLang != null)
                       Container(
-                        margin: const EdgeInsets.only(bottom: 6),
+                        margin: const EdgeInsets.only(bottom: 5),
                         padding: const EdgeInsets.symmetric(
                           horizontal: 10,
                           vertical: 4,
@@ -2123,12 +2610,11 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                         ),
                       ),
 
-                    // رأس مدمج وخفيف للعنوان والوسوم لا يلتهم مساحة الشاشة
                     Container(
-                      margin: const EdgeInsets.only(bottom: 6),
+                      margin: const EdgeInsets.only(bottom: 5),
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
-                        vertical: 4,
+                        vertical: 3,
                       ),
                       decoration: BoxDecoration(
                         color: pal.isDark
@@ -2142,14 +2628,15 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                         children: [
                           TextField(
                             controller: _titleController,
+                            focusNode: _titleFocusNode,
                             readOnly: _isReadingMode,
                             style: titleStyle.copyWith(
-                              fontSize: math.min(_titleFontSize, 22.0),
+                              fontSize: math.min(_titleFontSize, 21.0),
                             ),
                             decoration: InputDecoration(
                               isDense: true,
                               contentPadding:
-                                  const EdgeInsets.symmetric(vertical: 6),
+                                  const EdgeInsets.symmetric(vertical: 5),
                               hintText: 'عنوان الملاحظة...',
                               hintStyle: TextStyle(color: pal.textMuted),
                               border: InputBorder.none,
@@ -2202,6 +2689,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                                       width: 115,
                                       child: TextField(
                                         controller: _tagController,
+                                        focusNode: _tagFocusNode,
                                         style: TextStyle(
                                           color: pal.textPrimary,
                                           fontSize: 12,
@@ -2237,13 +2725,12 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                       ),
                     ),
 
-                    // لوحة المرفقات والروابط والمهام القابلة للطي حتى لا تضغط مساحة المحرر
                     if (_showExtrasPanel &&
                         (extrasCount > 0 || _showChecklistInput))
                       ConstrainedBox(
                         constraints: const BoxConstraints(maxHeight: 200),
                         child: Container(
-                          margin: const EdgeInsets.only(bottom: 6),
+                          margin: const EdgeInsets.only(bottom: 5),
                           padding: const EdgeInsets.all(10),
                           decoration: BoxDecoration(
                             color: pal.isDark
@@ -2492,6 +2979,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                                       Expanded(
                                         child: TextField(
                                           controller: _todoController,
+                                          focusNode: _todoFocusNode,
                                           style: TextStyle(
                                             color: pal.textPrimary,
                                             fontSize: 13,
@@ -2601,7 +3089,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                         ),
                       ),
 
-                    // المحرر الرئيسي يملأ كامل المساحة المتبقية من الشاشة
                     Expanded(
                       child: _isReadingMode
                           ? _buildVirtualizedReadingArea(
@@ -2613,60 +3100,109 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                           : _buildFullScreenEditor(pal, contentStyle, isCode),
                     ),
 
-                    // شريط الحالة النحيف أسفل المحرر
+                    // شريط الحالة + أزرار نسخ نطاق الأسطر وإخفاء/إظهار الكيبورد بدون فقدان التحديد
                     Padding(
                       padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
+                        horizontal: 4,
                         vertical: 4,
                       ),
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text(
-                            '$_cachedWordCount كلمة · $_cachedLineCount سطر · ${_contentController.text.length} حرف',
-                            style:
-                                TextStyle(color: pal.textMuted, fontSize: 11),
+                          Flexible(
+                            child: Text(
+                              '$_cachedWordCount كلمة · $_cachedLineCount سطر · ${_contentController.text.length} حرف',
+                              overflow: TextOverflow.ellipsis,
+                              style:
+                                  TextStyle(color: pal.textMuted, fontSize: 11),
+                            ),
                           ),
-                          if (_cachedLinks.isNotEmpty && !_showExtrasPanel)
-                            GestureDetector(
-                              onTap: () =>
-                                  setState(() => _showExtrasPanel = true),
-                              child: Text(
-                                '${_cachedLinks.length} رابط جاهز للفتح ↗',
-                                style: TextStyle(
-                                  color: pal.textPrimary,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            )
-                          else if (!isCode && !_isReadingMode)
-                            Row(
-                              children: [
-                                GestureDetector(
-                                  onTap: () => _insertTextAtCursor('\n• '),
-                                  child: Text(
-                                    '• نقطة',
-                                    style: TextStyle(
-                                      color: pal.textSecondary,
-                                      fontSize: 11.5,
-                                    ),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              GestureDetector(
+                                onTap: () => _showLineRangeCopyDialog(pal),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 3,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: pal.chipBg,
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: pal.glassBorder),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        Icons.playlist_add_check,
+                                        size: 14,
+                                        color: pal.textPrimary,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        'من-إلى ✓',
+                                        style: TextStyle(
+                                          color: pal.textPrimary,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                                const SizedBox(width: 12),
+                              ),
+                              if (!_isReadingMode) ...[
+                                const SizedBox(width: 6),
                                 GestureDetector(
-                                  onTap: () =>
-                                      _insertTextAtCursor('\n──────────\n'),
-                                  child: Text(
-                                    '— فاصل',
-                                    style: TextStyle(
-                                      color: pal.textSecondary,
-                                      fontSize: 11.5,
+                                  onTap: _toggleKeyboardVisibility,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 7,
+                                      vertical: 3,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: _suppressKeyboard
+                                          ? pal.accent
+                                          : pal.chipBg,
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                        color: _suppressKeyboard
+                                            ? pal.accent
+                                            : pal.glassBorder,
+                                      ),
+                                    ),
+                                    child: Icon(
+                                      _suppressKeyboard
+                                          ? Icons.keyboard
+                                          : Icons.keyboard_hide_outlined,
+                                      size: 14,
+                                      color: _suppressKeyboard
+                                          ? pal.onAccent
+                                          : pal.textPrimary,
                                     ),
                                   ),
                                 ),
                               ],
-                            ),
+                              if (_cachedLinks.isNotEmpty &&
+                                  !_showExtrasPanel) ...[
+                                const SizedBox(width: 6),
+                                GestureDetector(
+                                  onTap: () =>
+                                      setState(() => _showExtrasPanel = true),
+                                  child: Text(
+                                    '${_cachedLinks.length} رابط ↗',
+                                    style: TextStyle(
+                                      color: pal.textPrimary,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
                         ],
                       ),
                     ),
@@ -2680,7 +3216,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
               ),
               child: Container(
                 padding:
-                    const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+                    const EdgeInsets.symmetric(vertical: 5, horizontal: 8),
                 decoration: BoxDecoration(
                   color: pal.elevatedBg,
                   border: Border(top: BorderSide(color: pal.divider)),
@@ -2718,8 +3254,7 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
                         tooltip: 'وضع الكود البرمجي',
                         icon: Icon(
                           Icons.code,
-                          color:
-                              isCode ? pal.textPrimary : pal.textSecondary,
+                          color: isCode ? pal.textPrimary : pal.textSecondary,
                         ),
                         onPressed: () {
                           if (!isCode) {
@@ -2806,7 +3341,6 @@ class _AddNoteScreenState extends State<AddNoteScreen> {
   }
 }
 
-/// رسام أرقام الأسطر الظاهرة فقط (يرسم ~30 سطراً في أجزاء من الملي ثانية حتى مع 50,000 سطر)
 class _LineGutterPainter extends CustomPainter {
   final ScrollController scrollController;
   final int lineCount;
@@ -2866,7 +3400,8 @@ class _LineGutterPainter extends CustomPainter {
     canvas.clipRect(Offset.zero & size);
 
     for (int i = first; i <= last; i++) {
-      final double y = topPadding + (i * lineH) - scrollOffset + (lineH - fontSize) * 0.2;
+      final double y =
+          topPadding + (i * lineH) - scrollOffset + (lineH - fontSize) * 0.2;
       tp.text = TextSpan(text: '${i + 1}', style: style);
       tp.layout(minWidth: size.width - 8, maxWidth: size.width - 8);
       tp.paint(canvas, Offset(2, y));
